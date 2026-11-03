@@ -1,0 +1,89 @@
+export type Credential = {
+  id: string; provider: "openrouter" | "gemini"; label: string; model: string;
+  upstreams: string[]; approved: boolean; priority: number; status: string;
+  checked_at: string | null;
+  quota_snapshot: { source?: string; checked_at?: string; daily?: { used: number; limit: number; remaining: number } | null };
+};
+export type Conversation = { id: string; title: string; created_at: string };
+export type ChatMessage = {
+  id: string; role: "user" | "assistant"; content: string; status: string;
+  provider?: string | null; model?: string | null;
+};
+export type Activity = {
+  id: string; provider: string; model: string; upstreams: string[]; status: string;
+  usage: { total_tokens?: number }; created_at: string;
+};
+export type Model = { id: string; name: string; context_length: number };
+export type Endpoint = { id: string; name: string; context_length: number };
+
+const errors: Record<string, string> = {
+  "Authentication required": "로그인이 필요합니다.",
+  "Authentication not configured": "GitHub 로그인 설정이 필요합니다.",
+  "Policy service unavailable": "API 서버에 연결할 수 없습니다.",
+  "Provider preflight timed out": "제공자 사전 확인 시간이 초과됐습니다.",
+  "Service not configured": "서버 설정이 필요합니다.",
+  "Invalid input": "입력값을 확인해주세요.",
+  "Another request is running": "진행 중인 요청을 먼저 중지해주세요.",
+  "No approved verified-free provider is available": "사용 가능한 무료 연결이 없습니다. 연결과 전송 동의를 확인해주세요.",
+  "Conversation context limit reached; start a new conversation": "대화 길이 제한에 도달했습니다. 새 대화를 시작해주세요.",
+  "Request already submitted": "이미 처리한 요청입니다.",
+  "Approved inference provider required": "허용할 실제 처리업체를 선택해주세요.",
+  "Application rate limit reached": "요청이 많습니다. 잠시 후 다시 시도해주세요.",
+  "Credential limit reached": "연결은 최대 5개까지 등록할 수 있습니다.",
+  invalid_key: "키를 확인할 수 없습니다. 발급한 서비스에서 키 상태를 확인해주세요.",
+  verification_unavailable: "제공자의 키 확인 서비스에 연결할 수 없습니다.",
+  catalog_unavailable: "무료 모델 목록을 확인할 수 없습니다.",
+  endpoints_unavailable: "실제 처리업체 목록을 확인할 수 없습니다.",
+  model_not_free: "현재 무료로 확인된 모델이 아닙니다.",
+  provider_unavailable: "제공자에 일시적인 장애가 발생했습니다.",
+  rate_limited: "제공자의 사용 한도에 도달했습니다.",
+  policy_refusal: "제공자의 안전 정책에 따라 요청이 거절됐습니다.",
+  consent_changed: "연결 또는 전송 동의가 변경되어 요청을 중지했습니다.",
+  request_timeout: "요청 시간이 초과됐습니다.",
+  free_eligibility_unknown: "무료 사용 자격을 확인할 수 없습니다.",
+  empty_response: "제공자가 빈 응답을 반환했습니다.",
+};
+
+export function errorMessage(code: string): string {
+  return errors[code] || "요청을 완료하지 못했습니다. 연결 상태를 확인해주세요.";
+}
+
+export async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`/api/gateway/${path}`, {
+    ...options, headers: { "Content-Type": "application/json", ...options?.headers }, cache: "no-store",
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(errorMessage(typeof payload.detail === "string" ? payload.detail : "unknown"));
+  }
+  return response.status === 204 ? undefined as T : response.json();
+}
+
+export async function consumeStream(
+  response: Response, onEvent: (event: string, payload: Record<string, unknown>) => void,
+): Promise<void> {
+  if (!response.body) throw new Error("응답 스트림이 없습니다.");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let boundary: RegExpExecArray | null;
+      while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        const block = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+        const lines = block.split(/\r?\n/);
+        const event = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
+        const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+        if (event && data) onEvent(event, JSON.parse(data));
+      }
+      if (buffer.length > 1048576) throw new Error("응답 크기 제한을 초과했습니다.");
+      if (done) break;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}

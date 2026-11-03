@@ -1,0 +1,115 @@
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import Request
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, create_engine, event
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+from app.config import get_settings
+
+
+def identifier() -> str:
+    return str(uuid4())
+
+
+def timestamp() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Credential(Base):
+    __tablename__ = "credentials"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    label: Mapped[str] = mapped_column(String(80))
+    encrypted_key: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30), default="unverified")
+    model: Mapped[str] = mapped_column(String(200))
+    upstreams: Mapped[list] = mapped_column(JSON, default=list)
+    approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    consent_version: Mapped[str] = mapped_column(String(36), default=identifier)
+    quota_group: Mapped[str] = mapped_column(String(100), default="account")
+    quota_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    checked_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    title: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+class Message(Base):
+    __tablename__ = "messages"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="complete")
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+class Run(Base):
+    __tablename__ = "runs"
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="running")
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+class Attempt(Base):
+    __tablename__ = "attempts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    model: Mapped[str] = mapped_column(String(200))
+    upstreams: Mapped[list] = mapped_column(JSON, default=list)
+    consent_version: Mapped[str] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(30), default="started")
+    usage: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+def make_engine(url: str):
+    engine = create_engine(
+        url, connect_args={"check_same_thread": False} if url.startswith("sqlite:") else {}
+    )
+    if url.startswith("sqlite:"):
+
+        @event.listens_for(engine, "connect")
+        def enable_foreign_keys(connection, _record):
+            connection.execute("PRAGMA foreign_keys=ON")
+
+    return engine
+
+
+def initialize_database():
+    settings = get_settings()
+    if settings.database_url.startswith("sqlite:"):
+        Path(".local").mkdir(exist_ok=True)
+    engine = make_engine(settings.database_url)
+    if settings.environment == "local":
+        Base.metadata.create_all(engine)
+    return engine
+
+
+def session_for(request: Request):
+    with Session(request.app.state.engine) as session:
+        yield session

@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: wagl
+      POSTGRES_USER: wagl
+      POSTGRES_PASSWORD: ${WAGL_POSTGRES_PASSWORD:?Run scripts/init-local.ps1 first}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagl -d wagl"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [private]
+  redis:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [private]
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    env_file: .env
+    environment:
+      WAGL_ENVIRONMENT: production
+      WAGL_DATABASE_URL: postgresql+psycopg://wagl:${WAGL_POSTGRES_PASSWORD:?Missing database password}@postgres:5432/wagl
+      WAGL_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [private, outbound]
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    env_file: apps/web/.env.local
+    environment:
+      WAGL_API_URL: http://api:8000
+    ports:
+      - "127.0.0.1:${WAGL_WEB_PORT:-3000}:3000"
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [private, outbound]
+
+networks:
+  private:
+    internal: true
+  outbound: {}
+
+volumes:
+  postgres-data: {}
+  redis-data: {}
