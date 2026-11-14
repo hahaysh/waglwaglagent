@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "waglwaglagent-6d0f" },
+    "location": { "value": "koreacentral" },
+    "sessionId": { "value": "6d0f931c-bf0e-442c-bd01-b2c10e509e1b" },
+    "deployedBy": { "value": "operator" },
+    "createdAt": { "value": "2026-11-04T02:06:27.1398155+09:00" },
+    "deployerObjectId": { "value": "" },
+    "postgresOutboundIpRanges": { "value": [] },
+    "usePlaceholderImages": { "value": true },
+    "webImageTag": { "value": "pilot-placeholder" },
+    "apiImageTag": { "value": "pilot-placeholder" }
+  }
+}

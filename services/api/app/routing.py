@@ -39,6 +39,11 @@ def eligible_candidates(
             and (
                 candidate.provider == "gemini"
                 or (
+                    candidate.provider == "copilot"
+                    and candidate.model == "auto"
+                    and candidate.upstreams == ("github-copilot",)
+                )
+                or (
                     candidate.provider == "openrouter"
                     and candidate.model.endswith(":free")
                     and bool(candidate.upstreams)

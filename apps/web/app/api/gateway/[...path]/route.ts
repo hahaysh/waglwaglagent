@@ -1,5 +1,5 @@
 import { auth, authConfigured } from "@/auth";
-import { SignJWT } from "jose";
+import { policyToken } from "@/lib/policy-token";
 import { boundedBody } from "@/lib/request-body";
 
 export const runtime = "nodejs";
@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 
 const allowedRoutes: [RegExp, string[]][] = [
   [/^(catalog|endpoints|activity)$/, ["GET"]],
+  [/^connection-options$/, ["GET"]],
   [/^credentials$/, ["GET", "POST"]],
   [/^credentials\/[a-f0-9-]{36}$/, ["PATCH", "DELETE"]],
   [/^credentials\/[a-f0-9-]{36}\/verify$/, ["POST"]],
@@ -36,23 +37,21 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   let body: string | undefined;
   if (!["GET", "DELETE"].includes(request.method)) {
     try {
-      body = await boundedBody(request);
+      body = await boundedBody(request, route === "chat" ? 6 * 1024 * 1024 : 32768);
     } catch {
-      return Response.json({ detail: "Invalid input" }, { status: 413 });
+      return Response.json({ detail: "Input too large" }, { status: 413 });
     }
   }
-  const token = await new SignJWT({})
-    .setProtectedHeader({ alg: "HS256" })
-    .setSubject(session.user.id).setIssuer("wagl-web").setAudience("wagl-api")
-    .setIssuedAt().setExpirationTime("60s")
-    .sign(new TextEncoder().encode(secret));
+  const token = await policyToken(session.user.id);
   const url = new URL(`/${route}`, process.env.WAGL_API_URL || "http://127.0.0.1:8000");
   if (route === "endpoints") url.searchParams.set("model", new URL(request.url).searchParams.get("model") || "");
   try {
     const upstream = await fetch(url, {
       method: request.method, body, cache: "no-store", redirect: "error",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(route === "chat" ? 80000 : 20000)]),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(
+        route === "chat" ? 80000 : route.endsWith("/verify") ? 50000 : 20000,
+      )]),
     });
     return new Response(upstream.body, {
       status: upstream.status,

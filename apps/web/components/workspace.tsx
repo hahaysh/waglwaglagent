@@ -7,54 +7,107 @@ import Link from "next/link";
 import {
   Activity as ActivityIcon, ArrowUp, Check, ChevronRight, Copy,
   GitBranch, LogIn, KeyRound, LoaderCircle, LogOut, Menu, MessageSquare,
-  Plus, RefreshCw, Search, ShieldCheck, Square, Trash2, X,
+  Paperclip, Plus, RefreshCw, Search, ShieldCheck, Square, Trash2, X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, consumeStream, errorMessage, type Activity, type ChatMessage, type Conversation, type Credential } from "@/lib/api";
+import { api, consumeStream, errorMessage, type Activity, type ChatAttachment, type ChatMessage, type Conversation, type Credential } from "@/lib/api";
+import { attachmentAccept, readAttachments } from "@/lib/chat-attachments";
 import { ConnectionDialog } from "@/components/connection-dialog";
+import { GitHubOAuthSetupGuide } from "@/components/github-oauth-setup-guide";
+import { connectionProviders, connectionStateDescriptions, connectionStateLabels, type ConnectionProvider } from "@/lib/connection-providers";
 
 type View = "chat" | "connections" | "activity";
-type Props = { user: { id: string; name: string } | null; authConfigured: boolean };
+type Props = {
+  user: { id: string; name: string } | null; authConfigured: boolean;
+  initialProvider?: ConnectionProvider; connectionResult?: string;
+};
 
-export function Workspace({ user, authConfigured }: Props) {
-  const [view, setView] = useState<View>("chat");
+const testPrompts = [
+  {
+    label: "연결 테스트 · 한 줄 응답",
+    prompt: "연결 테스트입니다. 다른 설명 없이 '연결 성공'이라고만 답해주세요.",
+  },
+  {
+    label: "스트리밍·중지 테스트",
+    prompt: "스트리밍과 응답 중지 기능을 확인하려고 합니다. 1부터 30까지 각 숫자를 한 줄에 하나씩 쓰고, 각 줄에는 숫자 뒤에 짧은 한국어 문장을 붙여주세요.",
+  },
+  {
+    label: "서비스 전환·대화 이력 테스트",
+    prompt: "대화 이력 전달 테스트입니다. 이 대화의 테스트 단어는 '와글파랑'입니다. 나중에 테스트 단어를 물으면 이 단어를 답해주세요. 지금은 '기억했어요'라고만 답해주세요.",
+  },
+];
+
+export function Workspace({ user, authConfigured, initialProvider, connectionResult }: Props) {
+  const [view, setView] = useState<View>(connectionResult || initialProvider ? "connections" : "chat");
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [readingFiles, setReadingFiles] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [connectionsState, setConnectionsState] = useState<"loading" | "ready" | "error">(user ? "loading" : "ready");
   const [error, setError] = useState("");
-  const [dialog, setDialog] = useState(false);
+  const [dialog, setDialog] = useState(Boolean(initialProvider));
+  const [dialogProvider, setDialogProvider] = useState<ConnectionProvider | undefined>(initialProvider);
   const [loginHelp, setLoginHelp] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
+  const [selectedConnection, setSelectedConnection] = useState("");
   const controller = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const approved = credentials.filter((credential) => credential.approved && credential.status === "valid");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const connectionStatus = useRef<HTMLElement>(null);
+  const approved = credentials.filter((credential) => credential.approved && (
+    (credential.usage_state ? credential.usage_state === "available" : credential.status === "valid")
+    || (credential.provider === "copilot" && credential.auth_type === "oauth"
+      && credential.auth_status === "authenticated" && credential.upstreams.join() === "github-copilot"
+      && ["copilot_check_required", "copilot_plan_not_free", "copilot_overage_enabled"].includes(credential.usage_state || ""))
+  ));
+  const canSend = Boolean(user && connectionsState === "ready" && (selectedConnection
+    ? approved.some((credential) => credential.id === selectedConnection) : approved.length));
+  const showConnectionStatus = Boolean(user && !busy && !canSend);
+  const blockedConnections = selectedConnection
+    ? credentials.filter((credential) => credential.id === selectedConnection) : credentials;
 
   function addConnection() {
-    if (!user) { setLoginHelp(true); return; }
     setDialog(true);
   }
 
+  useEffect(() => {
+    if (!connectionResult && !initialProvider) return;
+    window.history.replaceState(null, "", "/");
+    if (connectionResult) {
+      if (connectionResult === "saved") setNotice("연결이 저장됐습니다. 메시지 전송 동의는 별도로 설정해주세요.");
+      else setError(connectionResult === "oauth_cancelled" ? "GitHub 승인이 취소됐습니다. 연결은 저장하지 않았습니다."
+        : "인증을 완료하지 못했습니다. 세션·연결 수·운영자 설정을 확인하고 다시 연결해주세요.");
+    }
+  }, [connectionResult, initialProvider]);
+
   async function refresh() {
     if (!user) return;
-    const [keys, chats] = await Promise.all([api<Credential[]>("credentials"), api<Conversation[]>("conversations")]);
-    setCredentials(keys); setConversations(chats);
+    try {
+      const [keys, chats] = await Promise.all([api<Credential[]>("credentials"), api<Conversation[]>("conversations")]);
+      setCredentials(keys); setConversations(chats); setConnectionsState("ready");
+    } catch (reason) {
+      setConnectionsState("error");
+      throw reason;
+    }
   }
 
   useEffect(() => {
     if (!user) return;
     let active = true;
+    setConnectionsState("loading");
     Promise.all([api<Credential[]>("credentials"), api<Conversation[]>("conversations")])
-      .then(([keys, chats]) => { if (active) { setCredentials(keys); setConversations(chats); } })
-      .catch((reason: Error) => { if (active) setError(reason.message); });
+      .then(([keys, chats]) => { if (active) { setCredentials(keys); setConversations(chats); setConnectionsState("ready"); } })
+      .catch((reason: Error) => { if (active) { setError(reason.message); setConnectionsState("error"); } });
     return () => { active = false; controller.current?.abort(); };
   }, [user]);
 
@@ -70,7 +123,7 @@ export function Workspace({ user, authConfigured }: Props) {
   }
 
   async function openConversation(id: string) {
-    if (busy) return;
+    if (busy || readingFiles) return;
     setLoading(true);
     try {
       const chat = await api<{ messages: ChatMessage[] }>(`conversations/${id}`);
@@ -80,8 +133,8 @@ export function Workspace({ user, authConfigured }: Props) {
   }
 
   function newChat() {
-    if (busy) return;
-    setMessages([]); setConversationId(null); setPrompt(""); setError(""); setView("chat"); setSidebarOpen(false);
+    if (busy || readingFiles) return;
+    setMessages([]); setConversationId(null); setPrompt(""); setAttachments([]); setError(""); setView("chat"); setSidebarOpen(false);
     textarea.current?.focus();
   }
 
@@ -91,29 +144,39 @@ export function Workspace({ user, authConfigured }: Props) {
   }
 
   async function send() {
-    if (!prompt.trim() || busy || !user || approved.length === 0) return;
+    if ((!prompt.trim() && !attachments.length) || busy || readingFiles) return;
+    if (!user) { setLoginHelp(true); return; }
+    if (!canSend) {
+      connectionStatus.current?.focus();
+      return;
+    }
     const content = prompt;
+    const files = attachments;
     const userMessageId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
-    setPrompt(""); setBusy(true); setError(""); setNotice("");
+    setPrompt(""); setAttachments([]); setBusy(true); setError(""); setNotice("");
     setMessages((previous) => [...previous,
-      { id: userMessageId, role: "user", content, status: "complete" },
+      { id: userMessageId, role: "user", content, attachments: files, status: "complete" },
       { id: assistantId, role: "assistant", content: "", status: "streaming" },
     ]);
     const abort = new AbortController();
     controller.current = abort;
     let terminal = false;
+    let accepted = false;
     try {
       const response = await fetch("/api/gateway/chat", {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: abort.signal,
-        body: JSON.stringify({ prompt: content, conversation_id: conversationId, request_id: crypto.randomUUID() }),
+        body: JSON.stringify({
+          prompt: content, conversation_id: conversationId, request_id: crypto.randomUUID(),
+          credential_id: selectedConnection || null,
+          attachments: files,
+        }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        setPrompt(content);
-        setMessages((previous) => previous.filter((message) => message.id !== userMessageId && message.id !== assistantId));
         throw new Error(errorMessage(payload.detail || "unknown"));
       }
+      accepted = true;
       await consumeStream(response, (event, payload) => {
         if (event === "conversation") setConversationId(String(payload.id));
         if (event === "attempt") {
@@ -123,19 +186,33 @@ export function Workspace({ user, authConfigured }: Props) {
         }
         if (event === "delta") setMessages((previous) => previous.map((message) => message.id === assistantId
           ? { ...message, content: message.content + String(payload.text) } : message));
+        if (event === "model") setMessages((previous) => previous.map((message) => message.id === assistantId
+          ? { ...message, model: String(payload.model) } : message));
         if (event === "error") { terminal = true; setError(errorMessage(String(payload.code))); }
         if (event === "done") { terminal = true; setMessages((previous) => previous.map((message) => message.id === assistantId
           ? { ...message, status: "complete" } : message)); }
       });
       if (!terminal) setError("연결이 끊겨 응답이 중단됐습니다.");
     } catch (reason) {
+      if (!accepted) {
+        setPrompt(content); setAttachments(files);
+        setMessages((previous) => previous.filter((message) => message.id !== userMessageId && message.id !== assistantId));
+      }
       if ((reason as Error).name !== "AbortError") setError((reason as Error).message);
     } finally {
       setMessages((previous) => previous.map((message) => message.id === assistantId && message.status === "streaming"
         ? { ...message, status: "interrupted" } : message));
       setBusy(false); controller.current = null;
-      await refresh().catch(() => undefined);
+      await refresh().catch((reason: Error) => setError(reason.message));
     }
+  }
+
+  async function addAttachments(files: File[]) {
+    if (busy || readingFiles || !files.length) return;
+    setReadingFiles(true); setError("");
+    try { setAttachments(await readAttachments(files, attachments)); }
+    catch (reason) { setError((reason as Error).message); }
+    finally { setReadingFiles(false); }
   }
 
   async function removeConversation(id: string) {
@@ -151,12 +228,29 @@ export function Workspace({ user, authConfigured }: Props) {
     if (action === "delete" && !confirm(`‘${credential.label}’ 연결을 삭제할까요?`)) return;
     setLoading(true); setError("");
     try {
-      if (action === "delete") await api(`credentials/${credential.id}`, { method: "DELETE" });
-      if (action === "verify") await api(`credentials/${credential.id}/verify`, { method: "POST", body: "{}" });
-      if (action === "toggle") await api(`credentials/${credential.id}`, {
-        method: "PATCH", body: JSON.stringify({ approved: priority === undefined ? !credential.approved : credential.approved,
-          priority: priority ?? credential.priority, upstreams: credential.upstreams }),
-      });
+      if (action === "delete") {
+        const result = await api<{ detail?: string } | undefined>(`credentials/${credential.id}`, { method: "DELETE" });
+        setNotice(result?.detail === "local_disconnect_only"
+          ? "이 사이트의 연결은 삭제됐지만 GitHub의 승인 철회는 실패했습니다. GitHub 설정 → Applications → Authorized OAuth Apps에서도 직접 철회해주세요."
+          : "연결을 삭제했습니다.");
+      }
+      if (action === "verify") {
+        const checked = await api<Credential>(`credentials/${credential.id}/verify`, { method: "POST", body: "{}" });
+        setNotice(checked.usage_state === "available" ? "남은 포함 사용량을 확인했습니다. 매 전송 전 다시 검사합니다."
+          : "");
+      }
+      if (action === "toggle") {
+        const currentConsent = credential.approved && (credential.provider !== "copilot"
+          || credential.upstreams.join() === "github-copilot");
+        const consent = priority === undefined ? !currentConsent : currentConsent;
+        if (priority === undefined && consent && credential.provider === "copilot"
+          && !confirm("대화와 기존 이력을 GitHub Copilot 및 Copilot이 선택한 모델 제공자로 전송하는 데 동의할까요? 남은 포함 사용량이 확인될 때만 전송하며, 소진되거나 이미 초과 사용 중이면 차단합니다. 다른 앱의 동시 사용이나 처리 중 소진까지 포함한 추가 과금 차단은 GitHub 예산 설정이 필요합니다. 기존 구독료는 별도입니다.")) return;
+        await api(`credentials/${credential.id}`, {
+          method: "PATCH", body: JSON.stringify({ approved: consent,
+            priority: priority ?? credential.priority,
+            upstreams: credential.provider === "copilot" && consent ? ["github-copilot"] : credential.upstreams }),
+        });
+      }
       await refresh();
     } catch (reason) { setError((reason as Error).message); }
     finally { setLoading(false); }
@@ -200,7 +294,7 @@ export function Workspace({ user, authConfigured }: Props) {
       <div className="workspace-main">
         <header className="topbar">
           <div className="breadcrumb"><button className="icon-button mobile-menu" title="메뉴 열기" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><span>작업공간</span><ChevronRight size={13} /><strong>{view === "chat" ? "대화" : view === "connections" ? "내 연결" : "사용 기록"}</strong></div>
-          <span className="free-policy"><ShieldCheck size={14} /> 무료 전용</span>
+          <span className="free-policy" title="무료 모델 또는 구독 포함량을 확인해 전송합니다. Copilot 전체 과금 차단은 제공자의 예산 설정이 필요합니다."><ShieldCheck size={14} /> 무료·구독 포함량 사용</span>
         </header>
 
         <main className="main-content">
@@ -212,17 +306,22 @@ export function Workspace({ user, authConfigured }: Props) {
                 {messages.length === 0 && <div className="empty-chat">
                   <div className="empty-symbol"><GitBranch size={36} strokeWidth={1.6} /></div>
                   <h2>생각이 이어지는 곳.</h2>
-                  <p>{user ? "무엇부터 이야기할까요?" : "대화를 시작하려면 로그인해주세요."}</p>
+                  <p>{user ? "아래 테스트로 연결과 대화 기능을 확인해보세요." : "대화를 시작하려면 로그인해주세요."}</p>
                   <div className="prompt-suggestions">
-                    {["복잡한 개념을 쉽게 풀어줘", "아이디어를 함께 정리해줘", "글의 흐름을 다듬어줘"].map((suggestion) => <button key={suggestion} onClick={() => { setPrompt(suggestion); textarea.current?.focus(); }}><span>{suggestion}</span><ArrowUp size={14} /></button>)}
+                    {testPrompts.map((suggestion) => <button key={suggestion.label} title={suggestion.prompt}
+                      onClick={() => { setPrompt(suggestion.prompt); textarea.current?.focus(); }}>
+                      <span>{suggestion.label}</span><ArrowUp size={14} />
+                    </button>)}
                   </div>
+                  <p className="prompt-test-help">선택하면 입력창에만 채워집니다. 전송 시 포함 사용량이 소모될 수 있습니다.<br />이력 테스트는 응답 후 연결을 바꾸고 “테스트 단어가 뭐였지?”라고 물어보세요.</p>
                 </div>}
                 {messages.map((message) => <article key={message.id} className={`message ${message.role}`}>
-                  <div className="message-author">{message.role === "user" ? <span className="message-avatar">{user?.name.slice(0, 1) || "U"}</span> : <span className="message-avatar assistant"><GitBranch size={15} /></span>}<strong>{message.role === "user" ? "나" : message.provider === "gemini" ? "Gemini" : "OpenRouter"}</strong>{message.model && <span className="message-model" title={message.model}>{message.model.split("/").pop()}</span>}</div>
-                  <div className="markdown">{message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
+                  <div className="message-author">{message.role === "user" ? <span className="message-avatar">{user?.name.slice(0, 1) || "U"}</span> : <span className="message-avatar assistant"><GitBranch size={15} /></span>}<strong>{message.role === "user" ? "나" : connectionProviders.find((entry) => entry.id === message.provider)?.name || "AI"}</strong>{message.model && <span className="message-model" title={message.model}>{message.model.split("/").pop()}</span>}</div>
+                  {!!message.attachments?.length && <ChatAttachments files={message.attachments} />}
+                  {(message.content || message.role === "assistant") && <div className="markdown">{message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
                     a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
                     img: ({ alt }) => <span>{alt || "외부 이미지"}</span>,
-                  }}>{message.content}</ReactMarkdown> : busy ? <span className="thinking"><LoaderCircle size={15} className="spin" /> 응답을 기다리는 중</span> : <span className="muted">응답 없음</span>}</div>
+                  }}>{message.content}</ReactMarkdown> : busy ? <span className="thinking"><LoaderCircle size={15} className="spin" /> 응답을 기다리는 중</span> : <span className="muted">응답 없음</span>}</div>}
                   {message.role === "assistant" && message.content && <div className="message-actions"><button className="icon-button" title="응답 복사" aria-label="응답 복사" onClick={() => copy(message.content)}><Copy size={14} /></button>{message.status === "interrupted" && <span className="interrupted">중단됨</span>}</div>}
                 </article>)}
                 <div ref={bottom} />
@@ -230,21 +329,78 @@ export function Workspace({ user, authConfigured }: Props) {
               <div className="composer-area">
                 {notice && <div className="stream-notice" role="status"><Check size={13} />{notice}</div>}
                 {!user && !authConfigured && <div className="setup-notice"><KeyRound size={13} /> GitHub 로그인 설정 대기</div>}
-                <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
-                  <textarea ref={textarea} aria-label="메시지" placeholder="메시지를 입력하세요" value={prompt} maxLength={8000} rows={3} disabled={busy}
+                {showConnectionStatus && <section id="chat-connection-status" className="chat-connection-status" role="status"
+                  aria-label="대화 연결 상태" aria-busy={loading || connectionsState === "loading"} tabIndex={-1} ref={connectionStatus}>
+                  <strong>{connectionsState === "loading" ? "연결 상태를 불러오는 중입니다." : "메시지를 아직 전송할 수 없습니다."}</strong>
+                  {connectionsState === "ready" && error && <p role="alert">{error}</p>}
+                  {connectionsState === "error" ? <>
+                    <p>연결 상태를 불러오지 못했습니다. {error || "서버 연결을 확인해주세요."} 입력한 메시지는 전송되지 않았습니다.</p>
+                    <button className="text-button" type="button" onClick={() => {
+                      setConnectionsState("loading"); setError("");
+                      void refresh().catch((reason: Error) => setError(reason.message));
+                    }}><RefreshCw size={14} /> 연결 상태 새로고침</button>
+                  </> : connectionsState === "ready" && <>
+                    <p>입력한 메시지는 전송되지 않았습니다. {credentials.length ? "아래 연결 상태를 확인해주세요." : "AI 연결을 추가하고 전송에 동의해주세요."}</p>
+                    {blockedConnections.map((credential) => <div className="chat-blocked-connection" key={credential.id}>
+                      <strong>{credential.label} · {connectionStateLabels[credential.usage_state || ""] || "이용 조건 확인 필요"}</strong>
+                      <p>{connectionStateDescriptions[credential.usage_state || ""] || "이 연결의 이용 조건을 확인할 수 없습니다. 연결 설정에서 인증·전송 동의·사용 상태를 확인해주세요."}</p>
+                      {credential.provider === "copilot" && credential.auth_status === "authenticated"
+                        && !["consent_required", "copilot_consent_required", "reauth_required"].includes(credential.usage_state || "") &&
+                        <button className="text-button" type="button" disabled={loading} onClick={() => keyAction(credential, "verify")}>
+                          <RefreshCw size={14} className={loading ? "spin" : ""} />{loading ? "이용 조건 확인 중…" : `${credential.label} 이용 조건 다시 확인`}
+                        </button>}
+                    </div>)}
+                    {selectedConnection && blockedConnections.length === 0 && <p>선택한 연결이 삭제됐거나 더 이상 존재하지 않습니다.</p>}
+                    <div className="chat-connection-actions">
+                      {selectedConnection && approved.length > 0 && <button className="text-button" type="button" disabled={loading} onClick={() => setSelectedConnection("")}>사용 가능한 자동 연결로 바꾸기</button>}
+                      <button className="text-button" type="button" disabled={loading} onClick={() => credentials.length ? void navigate("connections") : addConnection()}>
+                        {credentials.length ? "연결 설정 열기" : "연결 추가"}
+                      </button>
+                    </div>
+                  </>}
+                </section>}
+                <label className="chat-connection-picker">대화에 사용할 연결
+                  <select aria-label="대화에 사용할 연결" value={selectedConnection} disabled={busy || !user}
+                    onChange={(event) => setSelectedConnection(event.target.value)}>
+                    <option value="">자동 · 무료·구독 포함량 연결 우선순위 순</option>
+                    {credentials.map((credential) => <option key={credential.id} value={credential.id}
+                      disabled={!approved.some((entry) => entry.id === credential.id)}>
+                      {credential.label} · {connectionStateLabels[credential.usage_state || ""] || credential.status}
+                    </option>)}
+                  </select>
+                </label>
+                {approved.some((credential) => credential.provider === "copilot"
+                  && (!selectedConnection || credential.id === selectedConnection)) &&
+                  <p className="prompt-test-help">Copilot은 전송 직전 포함량을 확인합니다. 다른 앱의 동시 사용이나 응답 중 소진까지 추가 과금을 막으려면 GitHub의 예산·사용 중지를 설정하세요.</p>}
+                <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}
+                  onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+                  onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addAttachments(Array.from(event.dataTransfer.files)); } }}>
+                  <input ref={fileInput} type="file" className="attachment-input" aria-label="이미지 또는 텍스트 파일 첨부" accept={attachmentAccept}
+                    multiple disabled={busy || readingFiles} onChange={(event) => {
+                      void addAttachments(Array.from(event.target.files || [])); event.target.value = "";
+                    }} />
+                  {!!attachments.length && <ChatAttachments files={attachments} onRemove={readingFiles ? undefined : (index) => setAttachments((files) => files.filter((_, position) => position !== index))} />}
+                  <textarea ref={textarea} aria-label="메시지" aria-describedby={showConnectionStatus ? "chat-connection-status" : "attachment-help"} placeholder="메시지를 입력하세요 · 스크린샷 붙여넣기 가능" value={prompt} maxLength={8000} rows={3} disabled={busy}
+                    onPaste={(event) => {
+                      if (event.clipboardData.files.length) {
+                        event.preventDefault(); void addAttachments(Array.from(event.clipboardData.files));
+                      }
+                    }}
                     onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
-                  <div className="composer-footer"><span><GitBranch size={14} />{approved.length ? "허용된 연결 · 우선순위 순" : "연결 대기"}</span><div><small>{prompt.length}/8000</small>{busy ? <button type="button" className="send-button stopping" title="응답 중지" aria-label="응답 중지" onClick={stop}><Square size={15} fill="currentColor" /></button> : <button type="submit" className="send-button" aria-label="메시지 전송" title={!user ? "로그인 필요" : !approved.length ? "연결 필요" : "메시지 전송"} disabled={!user || !prompt.trim() || !approved.length}><ArrowUp size={19} /></button>}</div></div>
+                  <div className="composer-footer"><span><GitBranch size={14} />{busy ? "연결 확인·응답 처리 중…" : readingFiles ? "첨부 읽는 중…" : !canSend ? credentials.length ? "전송 차단 · 위 연결 상태 확인" : "연결 필요" : selectedConnection ? "선택한 연결만 사용" : "허용된 연결 · 우선순위 순"}</span><div><button type="button" className="icon-button" aria-label="파일 첨부" title="이미지·텍스트 파일 첨부" disabled={busy || readingFiles || attachments.length >= 3} onClick={() => fileInput.current?.click()}><Paperclip size={18} /></button><small>{prompt.length}/8000</small>{busy ? <button type="button" className="send-button stopping" title="응답 중지" aria-label="응답 중지" onClick={stop}><Square size={15} fill="currentColor" /></button> : <button type="submit" className="send-button" aria-label="메시지 전송" aria-describedby={showConnectionStatus ? "chat-connection-status" : undefined} title={!user ? "로그인 필요" : !canSend ? "전송할 수 없는 이유를 입력창 위에서 확인해주세요." : "메시지 전송"} disabled={(!prompt.trim() && !attachments.length) || !canSend || readingFiles}><ArrowUp size={19} /></button>}</div></div>
                 </form>
+                <p id="attachment-help" className="attachment-help">스크린샷 Ctrl+V · 파일 끌어놓기 · 최대 3개/합계 4MB<br />PNG·JPEG·WebP 각 2MB/16MP, UTF-8 텍스트·코드 각 32KB. 이미지는 Copilot만 지원합니다. 첨부는 선택한 서비스로 전송되고 대화와 함께 저장됩니다.</p>
                 <p className="composer-disclaimer">AI 응답에는 오류가 있을 수 있습니다. 중요한 내용은 확인하세요.</p>
               </div>
             </section>
             <aside className="provider-rail">
               <div className="rail-heading"><span>내 연결</span><button className="icon-button" title="연결 추가" aria-label="연결 추가" onClick={addConnection}><Plus size={17} /></button></div>
+              <ProviderSummary provider="copilot" credentials={credentials} />
               <ProviderSummary provider="gemini" credentials={credentials} />
               <ProviderSummary provider="openrouter" credentials={credentials} />
               <button className="rail-link" onClick={() => navigate("connections")}>연결 관리 <ChevronRight size={14} /></button>
-              <div className="routing-diagram"><span className="eyebrow">ROUTING</span><div className="route-node"><MessageSquare size={15} /> 내 메시지</div><span className="route-line" /><div className="route-node policy"><ShieldCheck size={15} /> 전송 동의 · 무료 확인</div><span className="route-line" /><div className="route-node"><GitBranch size={15} /> 허용된 제공자</div></div>
-              <div className="rail-note"><ShieldCheck size={16} /><span>유료 모델 전환 없음</span></div>
+              <div className="routing-diagram"><span className="eyebrow">ROUTING</span><div className="route-node"><MessageSquare size={15} /> 내 메시지</div><span className="route-line" /><div className="route-node policy"><ShieldCheck size={15} /> 전송 동의 · 무료·포함량 확인</div><span className="route-line" /><div className="route-node"><GitBranch size={15} /> 허용된 제공자</div></div>
+              <div className="rail-note"><ShieldCheck size={16} /><span>전송 전 남은 구독 포함량 확인</span></div>
             </aside>
           </div>}
 
@@ -253,8 +409,8 @@ export function Workspace({ user, authConfigured }: Props) {
             {!user && <div className="empty-state"><KeyRound size={26} /><h2>로그인 후 연결을 등록하세요</h2><p>{authConfigured ? "등록한 키는 본인 요청에만 사용됩니다." : "서버의 GitHub 로그인 설정이 필요합니다. 연결 추가를 눌러 설정 방법을 확인하세요."}</p><button className="text-button" onClick={() => authConfigured ? signIn("github") : setLoginHelp(true)}>{authConfigured ? "GitHub로 로그인" : "로그인 설정 안내"}</button></div>}
             {user && credentials.length === 0 && <div className="empty-state"><KeyRound size={26} /><h2>등록된 연결이 없습니다</h2><button className="text-button" onClick={() => setDialog(true)}>첫 연결 추가 <ArrowUp size={14} /></button></div>}
             <div className="connection-list">{credentials.map((credential) => <div className="connection-row" key={credential.id}>
-              <ProviderLogo provider={credential.provider} /><div className="connection-detail"><strong>{credential.label}</strong><span>{credential.model}</span><small>{credential.upstreams.join(", ") || "무료 결제 등급 미확인"}</small><span className={`credential-status ${credential.status === "valid" ? "valid" : ""}`}>{credential.status === "valid" ? "키 확인됨" : credential.status === "invalid" ? "키 오류" : "무료 자격 미확인"}</span></div>
-              <div className="connection-controls"><label className="priority-control">우선순위 <input type="number" min={0} max={100} aria-label={`${credential.label} 우선순위`} defaultValue={credential.priority} disabled={loading} onBlur={(event) => { const priority = Number(event.target.value); if (Number.isInteger(priority) && priority >= 0 && priority <= 100 && priority !== credential.priority) void keyAction(credential, "toggle", priority); }} /></label><label className="switch-label"><input type="checkbox" role="switch" aria-label={`${credential.label} 전송 동의`} checked={credential.approved} disabled={loading} onChange={() => keyAction(credential, "toggle")} /><span className="switch-track" /> 전송 동의</label><button className="icon-button" aria-label={`${credential.label} 키 다시 확인`} title="키 다시 확인" disabled={loading} onClick={() => keyAction(credential, "verify")}><RefreshCw size={16} /></button><button className="icon-button danger" title="연결 삭제" aria-label={`${credential.label} 연결 삭제`} disabled={loading} onClick={() => keyAction(credential, "delete")}><Trash2 size={16} /></button></div>
+              <ProviderLogo provider={credential.provider} /><div className="connection-detail"><strong>{credential.label}</strong><span>{credential.model || connectionProviders.find((entry) => entry.id === credential.provider)?.name}</span><small>{credential.auth_type === "oauth" ? "OAuth 연결" : "API 키 연결"} · {credential.auth_status === "reauth_required" ? "재인증 필요" : "인증됨"}</small><small>{credential.upstreams.join(", ")}</small><span className={`credential-status ${credential.usage_state === "available" ? "valid" : ""}`}>{connectionStateLabels[credential.usage_state || ""] || (credential.status === "valid" ? "키 확인됨" : "무료 자격 미확인")}</span>{credential.provider === "copilot" && <><small>{credential.quota_snapshot.plan && `공식 조회 플랜: ${credential.quota_snapshot.plan} · `}{credential.checked_at ? `확인: ${new Date(credential.checked_at).toLocaleString("ko-KR")}` : "이용 조건을 다시 확인하세요."} 매 요청 전 남은 포함량·초과 사용 여부를 재검사합니다.</small><p>개인 유료·Business·Enterprise 구독도 추가 요금 없는 포함 사용량은 이용할 수 있습니다. 기존 구독료는 별도입니다.</p>{credential.quota_snapshot.overage_allowed && <p>GitHub의 소진 후 초과 사용이 허용돼 있습니다. 앱은 남은 포함량을 확인하지만 다른 앱의 동시 사용이나 처리 중 소진까지 과금을 보장하지는 못합니다. 추가 과금을 확실히 차단하려면 GitHub의 예산·사용 중지를 설정하세요.</p>}</>}{["copilot_plan_not_free", "copilot_overage_enabled", "copilot_overage_in_use"].includes(credential.usage_state || "") && <p>{connectionStateDescriptions[credential.usage_state || ""]}</p>}{credential.auth_type === "oauth" && <button className="text-button" onClick={() => { setDialogProvider("copilot"); setDialog(true); }}>Copilot 다시 연결</button>}</div>
+              <div className="connection-controls"><label className="priority-control">우선순위 <input type="number" min={0} max={100} aria-label={`${credential.label} 우선순위`} defaultValue={credential.priority} disabled={loading} onBlur={(event) => { const priority = Number(event.target.value); if (Number.isInteger(priority) && priority >= 0 && priority <= 100 && priority !== credential.priority) void keyAction(credential, "toggle", priority); }} /></label><label className="switch-label"><input type="checkbox" role="switch" aria-label={`${credential.label} 전송 동의`} checked={credential.approved && (credential.provider !== "copilot" || credential.upstreams.join() === "github-copilot")} disabled={loading} onChange={() => keyAction(credential, "toggle")} /><span className="switch-track" /> 전송 동의</label><button className={credential.provider === "copilot" ? "text-button" : "icon-button"} aria-label={`${credential.label} ${credential.provider === "copilot" ? "이용 조건 다시 확인" : "키 다시 확인"}`} title="자격 다시 확인" disabled={loading} onClick={() => keyAction(credential, "verify")}><RefreshCw size={16} />{credential.provider === "copilot" && "이용 조건 다시 확인"}</button><button className="icon-button danger" title="연결 삭제" aria-label={`${credential.label} 연결 삭제`} disabled={loading} onClick={() => keyAction(credential, "delete")}><Trash2 size={16} /></button></div>
             </div>)}</div>
             <div className="policy-footnote"><ShieldCheck size={16} /><p>키는 암호화해 서버에 저장됩니다. 전송 동의를 철회하면 진행 중 요청도 중지됩니다. 이미 제공자에 전송된 데이터는 회수할 수 없습니다.</p></div>
           </section>}
@@ -266,10 +422,26 @@ export function Workspace({ user, authConfigured }: Props) {
           {loading && <span className="loading-status" role="status"><LoaderCircle size={15} className="spin" /> 불러오는 중</span>}
         </main>
       </div>
-      {dialog && <ConnectionDialog onClose={() => setDialog(false)} onSaved={async () => { await refresh(); setDialog(false); }} />}
+      {dialog && <ConnectionDialog authenticated={Boolean(user)} authConfigured={authConfigured} initialProvider={dialogProvider} onLogin={(provider) => {
+        if (authConfigured) void signIn("github", { redirectTo: `/?connect=${provider}` });
+        else { setDialog(false); setLoginHelp(true); }
+      }} onClose={() => { setDialog(false); setDialogProvider(undefined); }} onSaved={async () => { await refresh(); setDialog(false); setDialogProvider(undefined); setNotice("연결이 저장됐습니다. 전송 동의 전에는 비활성입니다."); }} />}
       {loginHelp && <ConnectionLoginHelp authConfigured={authConfigured} onClose={() => setLoginHelp(false)} />}
     </div>
   );
+}
+
+function ChatAttachments({ files, onRemove }: { files: ChatAttachment[]; onRemove?: (index: number) => void }) {
+  return <ul className="chat-attachments" aria-label="첨부 파일">
+    {files.map((file, index) => <li key={`${index}-${file.name}`}>
+      <a href={`data:${file.mime_type};base64,${file.data}`} download={file.name} title={`${file.name} 다운로드`}>
+        {file.mime_type.startsWith("image/") ? <Image src={`data:${file.mime_type};base64,${file.data}`}
+          alt={`${file.name} 미리보기`} width={112} height={72} unoptimized /> : <Paperclip size={22} />}
+        <span>{file.name}</span>
+      </a>
+      {onRemove && <button type="button" className="icon-button" aria-label={`${file.name} 첨부 삭제`} title="첨부 삭제" onClick={() => onRemove(index)}><X size={14} /></button>}
+    </li>)}
+  </ul>;
 }
 
 function ConnectionLoginHelp({ authConfigured, onClose }: { authConfigured: boolean; onClose: () => void }) {
@@ -279,30 +451,28 @@ function ConnectionLoginHelp({ authConfigured, onClose }: { authConfigured: bool
     <div className="dialog-heading"><h2 id="connection-login-title">{authConfigured ? "연결 추가 전 로그인이 필요합니다" : "GitHub 로그인 설정이 필요합니다"}</h2><button className="icon-button" aria-label="로그인 안내 닫기" onClick={onClose}><X size={20} /></button></div>
     <p>개인 연결을 안전하게 저장하려면 먼저 waglwaglagent에 로그인해야 합니다. AI 제공자 연결과는 별도입니다.</p>
     {!authConfigured && <>
-      <p>현재 서버에 GitHub OAuth 정보가 설정되지 않아 로그인할 수 없습니다. 운영자는 다음 설정을 완료해주세요.</p>
-      <ol>
-        <li><a href="https://github.com/settings/developers" target="_blank" rel="noopener noreferrer">GitHub OAuth Apps</a>에서 앱을 등록합니다.</li>
-        <li>Homepage URL은 이 사이트 주소, Callback URL은 사이트 주소 뒤에 <code>/api/auth/callback/github</code>를 붙입니다.</li>
-        <li>서버의 <code>apps/web/.env.local</code>에 <code>AUTH_GITHUB_ID</code>와 <code>AUTH_GITHUB_SECRET</code>을 설정합니다.</li>
-        <li>웹 서버를 재시작한 뒤 로그인하고 연결을 추가합니다.</li>
-      </ol>
-      <p>Client secret과 API 키는 채팅에 보내지 마세요. 호스팅 환경에서는 서버 환경 변수로 설정하세요.</p>
+      <p>현재 서버에 GitHub OAuth 정보가 설정되지 않아 로그인할 수 없습니다. 아래는 운영자 최초 설정이며 일반 사용자가 앱을 등록할 필요는 없습니다.</p>
+      <p>스크린샷은 localhost 예시입니다. 호스팅에서는 Homepage URL과 Redirect URI의 주소를 실제 HTTPS 사이트 주소로 바꾸고 서버 환경 변수로 설정하세요.</p>
+      <GitHubOAuthSetupGuide kind="login" />
+      <p>웹 서버를 재시작한 뒤 로그인하세요. Copilot 연결용 앱은 별도이며, 연결 추가 → GitHub Copilot의 옆 안내에서 두 번째 등록 예시를 확인할 수 있습니다. Client secret과 API 키는 채팅에 보내지 마세요.</p>
     </>}
     <div className="dialog-footer"><button className="secondary-button" onClick={onClose}>닫기</button>{authConfigured && <button className="primary-button" onClick={() => signIn("github")}><LogIn size={16} /> GitHub로 로그인</button>}</div>
   </dialog>;
 }
 
 export function ProviderLogo({ provider }: { provider: string }) {
+  if (!["gemini", "openrouter"].includes(provider)) return <span className="provider-logo" aria-hidden="true"><KeyRound size={22} /></span>;
   return <span className={`provider-logo ${provider}`}><Image src={provider === "gemini" ? "/gemini.png" : "/openrouter.png"} width={24} height={24} alt="" unoptimized /></span>;
 }
 
-function ProviderSummary({ provider, credentials }: { provider: "gemini" | "openrouter"; credentials: Credential[] }) {
+function ProviderSummary({ provider, credentials }: { provider: "gemini" | "openrouter" | "copilot"; credentials: Credential[] }) {
   const keys = credentials.filter((credential) => credential.provider === provider);
-  const enabled = keys.some((credential) => credential.approved && credential.status === "valid");
+  const enabled = keys.some((credential) => credential.approved && (credential.usage_state
+    ? credential.usage_state === "available" : credential.status === "valid"));
   const snapshotKey = keys.find((credential) => credential.quota_snapshot.daily);
   const daily = snapshotKey?.quota_snapshot.daily;
-  return <div className="provider-summary"><div className="provider-title"><ProviderLogo provider={provider} /><strong>{provider === "gemini" ? "Gemini" : "OpenRouter"}</strong><span className={`status-dot ${enabled ? "online" : ""}`} /></div>
-    <div className="provider-state">{keys.length ? enabled ? "전송 허용됨" : provider === "gemini" ? "무료 자격 미확인" : "전송 미허용" : "미연결"}</div>
+  return <div className="provider-summary"><div className="provider-title"><ProviderLogo provider={provider} /><strong>{connectionProviders.find((entry) => entry.id === provider)?.name}</strong><span className={`status-dot ${enabled ? "online" : ""}`} /></div>
+    <div className="provider-state">{keys.length ? enabled ? "무료·포함량 대화 가능 · 전송 전 재검사" : connectionStateLabels[keys[0].usage_state || ""] || "전송 미허용" : "미연결"}</div>
     <div className="quota-line"><span>무료 일일 잔여</span><strong>{daily ? `${daily.remaining.toLocaleString()}회` : "알 수 없음"}</strong></div>
     {daily && <div className="quota-meter"><span style={{ width: `${Math.max(0, Math.min(100, daily.remaining / Math.max(1, daily.limit) * 100))}%` }} /></div>}
     {daily && <small className="quota-source">공식 조회값 · {snapshotKey?.checked_at ? new Date(snapshotKey.checked_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "시각 미확인"}</small>}

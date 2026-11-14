@@ -7,15 +7,19 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.attachments import MAX_CONTEXT_IMAGE_BYTES, context_size, prepare_messages
+from app.connections import revoke_copilot, router, usage_state, verify_copilot
+from app.copilot_provider import UPSTREAM, CopilotProvider
 from app.models import (
     Attempt,
     Conversation,
     Credential,
     Message,
+    OAuthAttempt,
     Run,
     identifier,
     initialize_database,
@@ -26,7 +30,13 @@ from app.providers import ProviderError, Providers
 from app.quotas import Limits
 from app.routing import Candidate, Failure, eligible_candidates, may_fallback
 from app.schemas import ChatInput, CredentialInput, PolicyInput
-from app.security import authenticated_owner, decrypt_key, encrypt_key, key_fingerprint
+from app.security import (
+    authenticated_owner,
+    decrypt_key,
+    decrypt_oauth,
+    encrypt_key,
+    key_fingerprint,
+)
 
 Owner = Annotated[str, Depends(authenticated_owner)]
 Database = Annotated[Session, Depends(session_for)]
@@ -38,8 +48,10 @@ async def lifespan(application: FastAPI):
 
     application.state.engine = initialize_database()
     application.state.providers = Providers()
+    application.state.copilot = CopilotProvider()
     application.state.limits = Limits(get_settings().redis_url)
     application.state.active = {}
+    application.state.connection_lock = asyncio.Lock()
     yield
     for task in list(application.state.active.values()):
         task.cancel()
@@ -49,10 +61,15 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="waglwaglagent policy API", lifespan=lifespan)
+app.include_router(router)
 
 
 @app.exception_handler(RequestValidationError)
 async def invalid_input(_request, _error):
+    for error in _error.errors():
+        reason = str(error.get("ctx", {}).get("error", ""))
+        if reason in {"attachment_invalid", "attachment_too_large", "attachment_unsupported"}:
+            return JSONResponse({"detail": reason}, status_code=422)
     return JSONResponse({"detail": "Invalid input"}, status_code=422)
 
 
@@ -99,8 +116,16 @@ def own_conversation(database: Session, owner: str, conversation_id: str) -> Con
     return conversation
 
 
+def quota_scope(credential: Credential) -> str:
+    if credential.provider == "copilot":
+        if not credential.provider_subject:
+            raise ProviderError(Failure.AUTH, "reauth_required")
+        return f"copilot:{credential.provider_subject}"
+    return f"{credential.provider}:{credential.quota_group}"
+
+
 def public_credential(credential: Credential) -> dict:
-    return {
+    result = {
         field: getattr(credential, field)
         for field in (
             "id",
@@ -115,8 +140,14 @@ def public_credential(credential: Credential) -> dict:
             "quota_snapshot",
             "checked_at",
             "created_at",
+            "auth_type",
+            "auth_status",
+            "expires_at",
+            "usage_policy",
         )
     }
+    result["usage_state"] = usage_state(credential)
+    return result
 
 
 @app.get("/catalog")
@@ -147,6 +178,13 @@ async def credentials(database: Database, owner: Owner):
 async def create_credential(
     body: CredentialInput, request: Request, database: Database, owner: Owner
 ):
+    async with request.app.state.connection_lock:
+        return await save_api_key(body, request, database, owner)
+
+
+async def save_api_key(
+    body: CredentialInput, request: Request, database: Session, owner: str,
+):
     await request.app.state.limits.rate_limit(owner, "credential", 10)
     count = database.scalar(
         select(func.count())
@@ -157,12 +195,20 @@ async def create_credential(
     )
     if count >= 5:
         raise HTTPException(409, "Credential limit reached")
+    if body.provider == "openrouter" and not body.model:
+        raise HTTPException(422, "Invalid input")
     if body.provider == "openrouter":
         upstreams = await request.app.state.providers.endpoints(body.model)
         allowed = {endpoint["id"] for endpoint in upstreams}
         if set(body.upstreams) - allowed or (body.approved and not body.upstreams):
             raise HTTPException(422, "Approved inference provider required")
     raw_key = body.api_key.get_secret_value()
+    fingerprint = key_fingerprint(raw_key)
+    if database.scalar(select(Credential.id).where(
+        Credential.owner_id == owner, Credential.provider == body.provider,
+        Credential.fingerprint == fingerprint,
+    )):
+        raise HTTPException(409, "duplicate_connection")
     snapshot = await request.app.state.providers.validate(body.provider, raw_key)
     credential_id = identifier()
     credential = Credential(
@@ -171,10 +217,10 @@ async def create_credential(
         provider=body.provider,
         label=body.label,
         encrypted_key=encrypt_key(raw_key, owner, credential_id),
-        fingerprint=key_fingerprint(raw_key),
+        fingerprint=fingerprint,
         model=body.model,
         upstreams=list(dict.fromkeys(body.upstreams)),
-        approved=body.approved,
+        approved=False,
         priority=body.priority,
         quota_group=body.quota_group,
         quota_snapshot=snapshot,
@@ -195,6 +241,8 @@ async def update_policy(
     owner: Owner,
 ):
     credential = own_credential(database, owner, credential_id)
+    if credential.provider == "copilot" and body.approved and body.upstreams != [UPSTREAM]:
+        raise HTTPException(422, "Approved inference provider required")
     if credential.provider == "openrouter" and body.approved:
         allowed = {
             endpoint["id"]
@@ -216,19 +264,44 @@ async def update_policy(
 
 @app.post("/credentials/{credential_id}/verify")
 async def verify_credential(credential_id: str, request: Request, database: Database, owner: Owner):
+    async with request.app.state.connection_lock:
+        return await verify_connection(credential_id, request, database, owner)
+
+
+async def verify_connection(
+    credential_id: str, request: Request, database: Session, owner: str,
+):
     await request.app.state.limits.rate_limit(owner, "credential", 10)
     credential = own_credential(database, owner, credential_id)
     try:
-        snapshot = await request.app.state.providers.validate(
-            credential.provider,
-            decrypt_key(credential.encrypted_key, owner, credential.id),
-        )
+        if credential.auth_type == "oauth":
+            snapshot = await verify_copilot(
+                request.app.state.providers.client, credential, database,
+            )
+            if credential.auth_status == "authenticated":
+                tokens = decrypt_oauth(credential.encrypted_key, owner, credential.id)
+                snapshot = await request.app.state.copilot.verify(tokens["access_token"])
+                credential.model = "auto"
+                if snapshot["status"] == "invalid":
+                    credential.auth_status = "reauth_required"
+        else:
+            snapshot = await request.app.state.providers.validate(
+                credential.provider,
+                decrypt_key(credential.encrypted_key, owner, credential.id),
+            )
+            credential.auth_status = "authenticated"
         credential.status = snapshot["status"]
         credential.quota_snapshot = snapshot
     except ProviderError as error:
         if error.failure == Failure.AUTH:
             credential.status = "invalid"
-            database.commit()
+            credential.auth_status = "reauth_required"
+        elif credential.provider == "copilot":
+            credential.status = "unverified"
+            credential.quota_snapshot = {
+                "status": "unverified", "reason": error.code, "source": "copilot_sdk",
+            }
+        database.commit()
         raise
     credential.checked_at = timestamp()
     database.commit()
@@ -237,10 +310,29 @@ async def verify_credential(credential_id: str, request: Request, database: Data
 
 @app.delete("/credentials/{credential_id}", status_code=204)
 async def delete_credential(credential_id: str, request: Request, database: Database, owner: Owner):
-    database.delete(own_credential(database, owner, credential_id))
-    database.commit()
+    async with request.app.state.connection_lock:
+        return await disconnect(credential_id, request, database, owner)
+
+
+async def disconnect(
+    credential_id: str, request: Request, database: Session, owner: str,
+):
+    credential = own_credential(database, owner, credential_id)
+    tokens = (
+        decrypt_oauth(credential.encrypted_key, owner, credential.id)
+        if credential.auth_type == "oauth" else None
+    )
     if owner in request.app.state.active:
         request.app.state.active[owner].cancel()
+    database.execute(update(OAuthAttempt).where(
+        OAuthAttempt.owner_id == owner, OAuthAttempt.provider == credential.provider,
+    ).values(status="cancelled", encrypted_verifier=None))
+    database.delete(credential)
+    database.commit()
+    if tokens and not await revoke_copilot(request.app.state.providers.client, tokens):
+        return JSONResponse(
+            {"detail": "local_disconnect_only"}, status_code=200,
+        )
 
 
 @app.get("/conversations")
@@ -278,6 +370,7 @@ async def conversation_detail(conversation_id: str, database: Database, owner: O
                     "id",
                     "role",
                     "content",
+                    "attachments",
                     "provider",
                     "model",
                     "status",
@@ -331,7 +424,10 @@ async def cancel(request: Request, owner: Owner):
         task.cancel()
 
 
-async def candidates_for(request: Request, owner: str, input_bytes: int) -> list[Candidate]:
+async def candidates_for(
+    request: Request, owner: str, input_bytes: int, credential_id: str | None = None,
+    requires_images: bool = False,
+) -> list[Candidate]:
     providers = request.app.state.providers
     with Session(request.app.state.engine) as database:
         records = list(
@@ -348,7 +444,46 @@ async def candidates_for(request: Request, owner: str, input_bytes: int) -> list
     candidates = []
     last_error = None
     for credential in records:
-        scope = f"{credential.provider}:{credential.quota_group}"
+        if credential_id and credential.id != credential_id:
+            continue
+        if requires_images and credential.provider != "copilot":
+            last_error = ProviderError(Failure.INVALID, "attachment_provider_unsupported")
+            continue
+        if (
+            credential.provider == "copilot" and credential.auth_type == "oauth"
+            and credential.usage_policy == "free_only" and credential.auth_status == "authenticated"
+        ):
+            try:
+                async with request.app.state.connection_lock:
+                    with Session(request.app.state.engine) as database:
+                        current = own_credential(database, owner, credential.id)
+                        if not current.approved or current.upstreams != [UPSTREAM]:
+                            continue
+                        checked = await verify_connection(current.id, request, database, owner)
+                        snapshot = checked["quota_snapshot"]
+                        if snapshot["status"] != "valid":
+                            code = snapshot.get("reason", "copilot_free_eligibility_unknown")
+                            failure = (
+                                Failure.EXHAUSTED if code == "copilot_quota_exhausted"
+                                else Failure.INVALID
+                            )
+                            last_error = ProviderError(failure, code)
+                            continue
+                        candidates.append(Candidate(
+                            current.id, owner, "copilot", "auto", True,
+                            datetime.fromisoformat(snapshot["valid_until"]),
+                            (UPSTREAM,), current.priority,
+                        ))
+            except ProviderError as error:
+                last_error = error
+            continue
+        if (
+            credential.auth_type != "api_key" or credential.auth_status != "authenticated"
+            or credential.usage_policy != "free_only" or not credential.model
+            or credential.provider not in {"openrouter", "gemini"}
+        ):
+            continue
+        scope = quota_scope(credential)
         if not await request.app.state.limits.available(owner, scope):
             continue
         if credential.provider == "gemini":
@@ -419,13 +554,29 @@ async def execute_stream(
                     if not credential or not credential.approved:
                         yield sse("error", {"code": "consent_changed"})
                         break
+                    if (
+                        credential.provider != candidate.provider
+                        or credential.auth_status != "authenticated"
+                        or credential.usage_policy != "free_only"
+                        or credential.model != candidate.model
+                    ):
+                        yield sse("error", {"code": "consent_changed"})
+                        break
                     if candidate.upstreams and not set(candidate.upstreams).issubset(
                         credential.upstreams
                     ):
                         yield sse("error", {"code": "consent_changed"})
                         break
-                    scope = f"{credential.provider}:{credential.quota_group}"
-                    raw_key = decrypt_key(credential.encrypted_key, owner, credential.id)
+                    scope = quota_scope(credential)
+                    if candidate.provider == "copilot":
+                        if credential.auth_type != "oauth":
+                            yield sse("error", {"code": "consent_changed"})
+                            break
+                        raw_key = decrypt_oauth(
+                            credential.encrypted_key, owner, credential.id,
+                        )["access_token"]
+                    else:
+                        raw_key = decrypt_key(credential.encrypted_key, owner, credential.id)
                     consent = credential.consent_version
                     fingerprint = credential.fingerprint
                 endpoint_scope = f"endpoint:{candidate.credential_id}:{candidate.upstreams}"
@@ -473,7 +624,9 @@ async def execute_stream(
                     },
                 )
                 status, usage = "interrupted", {}
-                upstream_stream = request.app.state.providers.stream(
+                upstream_stream = request.app.state.copilot.stream(
+                    raw_key, messages,
+                ) if candidate.provider == "copilot" else request.app.state.providers.stream(
                     candidate.provider,
                     candidate.model,
                     raw_key,
@@ -484,13 +637,28 @@ async def execute_stream(
                     async for chunk in upstream_stream:
                         if await request.is_disconnected():
                             raise asyncio.CancelledError
-                        if chunk["type"] == "delta":
+                        if chunk["type"] == "eligibility":
+                            with Session(request.app.state.engine) as database:
+                                current = own_credential(database, owner, candidate.credential_id)
+                                if (
+                                    not current.approved or current.consent_version != consent
+                                    or current.upstreams != [UPSTREAM]
+                                ):
+                                    raise ProviderError(Failure.INVALID, "consent_changed")
+                                current.quota_snapshot = chunk["snapshot"]
+                                current.status = chunk["snapshot"]["status"]
+                                current.checked_at = timestamp()
+                                database.commit()
+                        elif chunk["type"] == "delta":
                             text += chunk["text"]
                             if len(text) > 100000:
                                 raise ProviderError(Failure.INVALID, "response_too_large")
                             yield sse("delta", {"text": chunk["text"]})
                         elif chunk["type"] == "usage":
                             usage = chunk["usage"]
+                            if candidate.provider == "copilot" and chunk.get("model"):
+                                model_name = chunk["model"]
+                                yield sse("model", {"model": model_name})
                     if not text:
                         raise ProviderError(Failure.INVALID, "empty_response")
                     status, final_status = "complete", "complete"
@@ -498,6 +666,17 @@ async def execute_stream(
                     break
                 except ProviderError as error:
                     status = error.code
+                    if candidate.provider == "copilot" and error.failure != Failure.REFUSAL:
+                        with Session(request.app.state.engine) as database:
+                            current = database.get(Credential, candidate.credential_id)
+                            if current and current.owner_id == owner:
+                                current.quota_snapshot = {
+                                    **current.quota_snapshot, "status": "unverified",
+                                    "reason": error.code, "source": "copilot_sdk",
+                                }
+                                current.status = "unverified"
+                                current.checked_at = timestamp()
+                                database.commit()
                     if error.failure == Failure.EXHAUSTED:
                         await request.app.state.limits.cool_down(owner, scope, error.retry_after)
                     elif error.failure == Failure.TRANSIENT:
@@ -509,6 +688,7 @@ async def execute_stream(
                             credential = database.get(Credential, candidate.credential_id)
                             if credential:
                                 credential.status = "invalid"
+                                credential.auth_status = "reauth_required"
                                 database.commit()
                     if may_fallback(error.failure, bool(text), index) and index < len(candidates):
                         yield sse("fallback", {"reason": error.code})
@@ -522,6 +702,7 @@ async def execute_stream(
                         attempt = database.get(Attempt, attempt_id)
                         if attempt:
                             attempt.status, attempt.usage = status, usage
+                            attempt.model = model_name
                             database.commit()
             else:
                 yield sse("error", {"code": "rate_limited"})
@@ -567,12 +748,14 @@ async def chat(body: ChatInput, request: Request, database: Database, owner: Own
     run_id = f"{owner}:{body.request_id}"
     if database.get(Run, run_id):
         raise HTTPException(409, "Request already submitted")
+    if body.credential_id:
+        own_credential(database, owner, body.credential_id)
     conversation = None
     messages = []
     if body.conversation_id:
         conversation = own_conversation(database, owner, body.conversation_id)
         messages = [
-            {"role": message.role, "content": message.content}
+            {"role": message.role, "content": message.content, "attachments": message.attachments}
             for message in database.scalars(
                 select(Message)
                 .where(Message.conversation_id == conversation.id)
@@ -583,22 +766,31 @@ async def chat(body: ChatInput, request: Request, database: Database, owner: Own
             )
             if message.status == "complete"
         ]
-    messages.append({"role": "user", "content": body.prompt})
-    input_bytes = sum(len(message["content"].encode()) for message in messages)
-    if input_bytes > 40000 or len(messages) > 80:
+    attachments = [attachment.model_dump() for attachment in body.attachments]
+    messages.append({"role": "user", "content": body.prompt, "attachments": attachments})
+    messages = prepare_messages(messages)
+    input_bytes, image_bytes = context_size(messages)
+    if input_bytes > 40000 or image_bytes > MAX_CONTEXT_IMAGE_BYTES or len(messages) > 80:
         raise HTTPException(422, "Conversation context limit reached; start a new conversation")
     lease = await request.app.state.limits.acquire(owner)
     try:
         async with asyncio.timeout(15):
-            candidates = await candidates_for(request, owner, input_bytes)
+            candidates = await candidates_for(
+                request, owner, input_bytes, body.credential_id, requires_images=bool(image_bytes),
+            )
         if not candidates:
             raise HTTPException(409, "No approved verified-free provider is available")
         if not conversation:
-            conversation = Conversation(id=identifier(), owner_id=owner, title=body.prompt[:80])
+            conversation = Conversation(
+                id=identifier(), owner_id=owner, title=(body.prompt or attachments[0]["name"])[:80],
+            )
             database.add(conversation)
             database.flush()
         database.add(Run(id=run_id, owner_id=owner, conversation_id=conversation.id))
-        database.add(Message(conversation_id=conversation.id, role="user", content=body.prompt))
+        database.add(Message(
+            conversation_id=conversation.id, role="user", content=body.prompt,
+            attachments=attachments,
+        ))
         database.commit()
     except TimeoutError:
         database.rollback()

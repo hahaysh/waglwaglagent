@@ -18,7 +18,9 @@ dependencies = [
   "pydantic-settings>=2.8,<3",
   "httpx>=0.28,<1",
   "litellm==1.100.4",
+  "github-copilot-sdk==1.0.34",
   "filelock>=4.2.1,<5",
+  "pillow>=12,<14",
 ]
 
 [project.optional-dependencies]

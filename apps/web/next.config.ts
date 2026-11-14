@@ -4,6 +4,7 @@ const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
   devIndicators: false,
+  logging: { incomingRequests: false },
   async headers() {
     return [{
       source: "/(.*)",

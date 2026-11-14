@@ -1,6 +1,10 @@
 .git
 .venv
 .local
+.copilot-azure
+.playwright-mcp
+.github
+**/.env.*
 **/node_modules
 **/.next
 **/__pycache__

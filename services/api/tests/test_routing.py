@@ -52,6 +52,18 @@ class RoutingTests(unittest.TestCase):
             [self.candidate, second],
         )
 
+    def test_copilot_requires_auto_and_explicit_github_upstream_consent(self):
+        candidate = replace(
+            self.candidate, provider="copilot", model="auto", upstreams=("github-copilot",),
+        )
+        self.assertEqual(eligible_candidates([candidate], "alice", self.now), [candidate])
+        rejected = [
+            replace(candidate, model="paid-model"),
+            replace(candidate, upstreams=()),
+            replace(candidate, free_verified_until=None),
+        ]
+        self.assertEqual(eligible_candidates(rejected, "alice", self.now), [])
+
     def test_no_fallback_after_partial_output_or_refusal(self):
         for failure in Failure:
             self.assertFalse(may_fallback(failure, True, 1))

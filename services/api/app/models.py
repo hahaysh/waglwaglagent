@@ -3,7 +3,17 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Request
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, create_engine, event
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from app.config import get_settings
@@ -23,14 +33,26 @@ class Base(DeclarativeBase):
 
 class Credential(Base):
     __tablename__ = "credentials"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "provider", "provider_subject", name="uq_provider_account"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
     owner_id: Mapped[str] = mapped_column(String(100), index=True)
     provider: Mapped[str] = mapped_column(String(30))
     label: Mapped[str] = mapped_column(String(80))
-    encrypted_key: Mapped[str] = mapped_column(Text)
-    fingerprint: Mapped[str] = mapped_column(String(64))
+    encrypted_key: Mapped[str] = mapped_column("encrypted_secret", Text)
+    secret_format: Mapped[str] = mapped_column(String(30), default="api_key_v1")
+    encryption_key_version: Mapped[int] = mapped_column(Integer, default=1)
+    auth_type: Mapped[str] = mapped_column(String(20), default="api_key")
+    auth_status: Mapped[str] = mapped_column(String(30), default="authenticated")
+    provider_subject: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    scopes: Mapped[list] = mapped_column(JSON, default=list)
+    expires_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    token_version: Mapped[int] = mapped_column(Integer, default=1)
+    usage_policy: Mapped[str] = mapped_column(String(30), default="free_only")
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="unverified")
-    model: Mapped[str] = mapped_column(String(200))
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     upstreams: Mapped[list] = mapped_column(JSON, default=list)
     approved: Mapped[bool] = mapped_column(Boolean, default=False)
     priority: Mapped[int] = mapped_column(Integer, default=0)
@@ -39,6 +61,20 @@ class Credential(Base):
     quota_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     checked_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+class OAuthAttempt(Base):
+    __tablename__ = "oauth_attempts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    binding_hash: Mapped[str] = mapped_column(String(64))
+    encrypted_verifier: Mapped[str | None] = mapped_column(Text, nullable=True)
+    redirect_uri: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    expires_at: Mapped[str] = mapped_column(String(40))
+    connection_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class Conversation(Base):
@@ -57,6 +93,7 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)
     provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="complete")

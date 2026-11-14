@@ -1,12 +1,19 @@
 export type Credential = {
-  id: string; provider: "openrouter" | "gemini"; label: string; model: string;
+  id: string; provider: "openrouter" | "gemini" | "copilot" | "openai" | "anthropic"; label: string; model: string | null;
+  auth_type?: "api_key" | "oauth"; auth_status?: string; usage_state?: string;
   upstreams: string[]; approved: boolean; priority: number; status: string;
   checked_at: string | null;
-  quota_snapshot: { source?: string; checked_at?: string; daily?: { used: number; limit: number; remaining: number } | null };
+  quota_snapshot: {
+    source?: string; checked_at?: string; reason?: string; plan?: string; overage_allowed?: boolean;
+    quotas?: Record<string, { remaining_percentage: number; reset_at: string | null }>;
+    daily?: { used: number; limit: number; remaining: number } | null;
+  };
 };
 export type Conversation = { id: string; title: string; created_at: string };
+export type ChatAttachment = { name: string; mime_type: string; data: string };
 export type ChatMessage = {
   id: string; role: "user" | "assistant"; content: string; status: string;
+  attachments?: ChatAttachment[];
   provider?: string | null; model?: string | null;
 };
 export type Activity = {
@@ -23,6 +30,11 @@ const errors: Record<string, string> = {
   "Provider preflight timed out": "제공자 사전 확인 시간이 초과됐습니다.",
   "Service not configured": "서버 설정이 필요합니다.",
   "Invalid input": "입력값을 확인해주세요.",
+  attachment_invalid: "첨부를 읽을 수 없습니다. 이미지는 PNG·JPEG·WebP(16MP 이하), 텍스트는 UTF-8(32KB 이하)인지 확인해주세요.",
+  attachment_too_large: "첨부는 파일당 2MB, 한 메시지 합계 4MB 이하여야 합니다.",
+  attachment_unsupported: "지원하지 않는 첨부 형식입니다. PNG·JPEG·WebP 또는 UTF-8 텍스트·코드 파일을 사용해주세요.",
+  attachment_provider_unsupported: "이미지 분석은 현재 GitHub Copilot 연결만 지원합니다. Copilot을 선택하거나 이미지 없는 새 대화를 시작해주세요.",
+  "Input too large": "요청 크기가 너무 큽니다. 첨부 개수나 파일 크기를 줄여주세요.",
   "Another request is running": "진행 중인 요청을 먼저 중지해주세요.",
   "No approved verified-free provider is available": "사용 가능한 무료 연결이 없습니다. 연결과 전송 동의를 확인해주세요.",
   "Conversation context limit reached; start a new conversation": "대화 길이 제한에 도달했습니다. 새 대화를 시작해주세요.",
@@ -42,6 +54,21 @@ const errors: Record<string, string> = {
   request_timeout: "요청 시간이 초과됐습니다.",
   free_eligibility_unknown: "무료 사용 자격을 확인할 수 없습니다.",
   empty_response: "제공자가 빈 응답을 반환했습니다.",
+  copilot_not_configured: "Copilot 연결 준비 중입니다. 운영자가 OAuth 설정을 완료해야 합니다.",
+  oauth_start_failed: "인증을 시작할 수 없습니다. 잠시 후 다시 시도해주세요.",
+  duplicate_connection: "이미 저장한 키입니다. 기존 연결에서 다시 확인해주세요.",
+  provider_permission_denied: "모델 목록 조회 권한이 없습니다. 키의 권한과 조직 정책을 확인해주세요.",
+  oauth_account_mismatch: "연결된 계정과 인증 계정이 다릅니다. 다시 연결해주세요.",
+  reauth_required: "GitHub 인증이 만료되거나 철회됐습니다. Copilot을 다시 연결해주세요.",
+  copilot_plan_not_free: "구독 포함 사용량을 지원하도록 정책이 변경됐습니다. 내 연결에서 이용 조건을 다시 확인해주세요.",
+  copilot_overage_enabled: "이전 판정입니다. 전송하면 남은 포함 사용량을 다시 확인합니다.",
+  copilot_overage_in_use: "Copilot이 이미 포함량을 넘겨 초과 사용 중이므로 전송하지 않았습니다. 다른 연결을 사용하거나 한도 갱신을 기다리세요.",
+  copilot_free_eligibility_unknown: "공식 SDK에서 남은 구독 포함 사용량을 확인할 수 없어 호출하지 않았습니다.",
+  copilot_quota_exhausted: "Copilot 포함 사용량을 소진했습니다. 추가 요금 없는 다른 연결을 선택하거나 한도 갱신을 기다리세요.",
+  copilot_unavailable: "Copilot 자격·한도 조회 또는 런타임에 일시적인 문제가 있습니다. 다시 확인해주세요.",
+  copilot_access_denied: "GitHub에서 Copilot 사용을 허용하지 않았습니다. 계정 자격과 조직 정책을 확인하세요.",
+  copilot_request_failed: "Copilot 요청을 완료하지 못했습니다. 자격을 다시 확인해주세요. 유료 경로로 전환하지 않았습니다.",
+  copilot_cleanup_failed: "Copilot 런타임 정리를 완료하지 못했습니다. 운영자에게 문의하세요.",
 };
 
 export function errorMessage(code: string): string {

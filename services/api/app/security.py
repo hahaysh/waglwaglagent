@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 
 import jwt
@@ -45,3 +46,11 @@ def decrypt_key(ciphertext: str, owner: str, credential_id: str) -> str:
 
 def key_fingerprint(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode()).hexdigest()
+
+
+def encrypt_oauth(tokens: dict, owner: str, credential_id: str) -> str:
+    return encrypt_key(json.dumps(tokens), owner, f"{credential_id}:oauth_v1")
+
+
+def decrypt_oauth(ciphertext: str, owner: str, credential_id: str) -> dict:
+    return json.loads(decrypt_key(ciphertext, owner, f"{credential_id}:oauth_v1"))

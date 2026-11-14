@@ -95,15 +95,34 @@ class Providers:
                     "https://openrouter.ai/api/v1/key",
                     headers={"Authorization": f"Bearer {raw_key}"},
                 )
-            else:
+            elif provider == "gemini":
                 response = await self.client.get(
                     "https://generativelanguage.googleapis.com/v1beta/models",
                     headers={"x-goog-api-key": raw_key},
                 )
-            if response.status_code in {400, 401, 403}:
+            elif provider == "openai":
+                response = await self.client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {raw_key}"},
+                )
+            elif provider == "anthropic":
+                response = await self.client.get(
+                    "https://api.anthropic.com/v1/models",
+                    headers={"x-api-key": raw_key, "anthropic-version": "2023-06-01"},
+                    params={"limit": 1},
+                )
+            else:
+                raise ProviderError(Failure.INVALID, "unsupported_provider")
+            if response.status_code in {400, 401}:
                 raise ProviderError(Failure.AUTH, "invalid_key")
+            if response.status_code == 403:
+                raise ProviderError(Failure.INVALID, "provider_permission_denied")
             response.raise_for_status()
-            if provider == "gemini":
+            if provider != "openrouter":
+                if not isinstance(response.json().get(
+                    "models" if provider == "gemini" else "data"
+                ), list):
+                    raise ValueError("Invalid models response")
                 return {"status": "unverified", "source": "billing_tier_unknown"}
             data = response.json()["data"]
             daily = data.get("free_model_daily_requests")

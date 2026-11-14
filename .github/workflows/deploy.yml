@@ -1,0 +1,166 @@
+name: Deploy Azure Web Apps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Do not interrupt a database migration with a newer deployment.
+concurrency:
+  group: waglwaglagent-azure-pilot
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+    permissions:
+      contents: read
+
+  deploy:
+    name: Build and deploy web and API
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: azure-pilot
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: waglwaglagent-6d0f-rg
+      ACR_NAME: waglwaglagent6d0facr
+      WEB_APP: waglwaglagent-6d0f-web
+      API_APP: waglwaglagent-6d0f-api
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify deployment identity configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variable in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::Set $variable in the azure-pilot GitHub environment after Azure provisioning."
+              exit 1
+            fi
+          done
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify provisioned resources and capture rollback images
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry=$(az acr show --name "$ACR_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query loginServer -o tsv)
+          for app in "$API_APP" "$WEB_APP"; do
+            az webapp show --name "$app" --resource-group "$AZURE_RESOURCE_GROUP" --query name -o tsv
+          done
+          web_host=$(az webapp show --name "$WEB_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query defaultHostName -o tsv)
+          api_host=$(az webapp show --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query defaultHostName -o tsv)
+          previous_api=$(az webapp config show --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query linuxFxVersion -o tsv)
+          previous_web=$(az webapp config show --name "$WEB_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query linuxFxVersion -o tsv)
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "web_host=$web_host" >> "$GITHUB_OUTPUT"
+          echo "api_host=$api_host" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Previous container configuration'
+            printf 'API: `%s`\n\nWeb: `%s`\n' "$previous_api" "$previous_web"
+            echo 'Database migrations are not automatically reversed on deployment failure.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          az acr login --name "$ACR_NAME"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build and push API
+        id: api
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: services/api/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.target.outputs.registry }}/waglwaglagent-api:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Build and push web
+        id: web
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.target.outputs.registry }}/waglwaglagent-web:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Deploy API immutable image
+        env:
+          IMAGE: ${{ steps.target.outputs.registry }}/waglwaglagent-api@${{ steps.api.outputs.digest }}
+          API_HOST: ${{ steps.target.outputs.api_host }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config appsettings set --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --settings WEBSITES_PORT=8000 --output none
+          az webapp config set --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --generic-configurations '{"healthCheckPath":"/health"}' --output none
+          az webapp config container set --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --container-image-name "$IMAGE" --container-registry-url "https://${IMAGE%%/*}" --output none
+          az webapp restart --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP"
+          curl --fail --silent --show-error --retry 30 --retry-all-errors --retry-delay 10 \
+            --max-time 15 "https://$API_HOST/health"
+      - name: Deploy web immutable image
+        env:
+          IMAGE: ${{ steps.target.outputs.registry }}/waglwaglagent-web@${{ steps.web.outputs.digest }}
+          WEB_HOST: ${{ steps.target.outputs.web_host }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config appsettings set --name "$WEB_APP" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --settings WEBSITES_PORT=3000 --output none
+          az webapp config set --name "$WEB_APP" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --generic-configurations '{"healthCheckPath":"/"}' --output none
+          az webapp config container set --name "$WEB_APP" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --container-image-name "$IMAGE" --container-registry-url "https://${IMAGE%%/*}" --output none
+          az webapp restart --name "$WEB_APP" --resource-group "$AZURE_RESOURCE_GROUP"
+          curl --fail --silent --show-error --output /dev/null --retry 30 --retry-all-errors \
+            --retry-delay 10 --max-time 15 "https://$WEB_HOST/"
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 "https://$WEB_HOST/api/gateway/credentials")
+          if [[ "$status" != "401" ]]; then
+            echo "::error::Expected unauthenticated gateway status 401, received $status."
+            exit 1
+          fi
+      - name: Record release
+        env:
+          REGISTRY: ${{ steps.target.outputs.registry }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          WEB_HOST: ${{ steps.target.outputs.web_host }}
+        shell: bash
+        run: |
+          {
+            echo "### waglwaglagent release"
+            printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'API: `%s/waglwaglagent-api@%s`\n\n' "$REGISTRY" "$API_DIGEST"
+            printf 'Web: `%s/waglwaglagent-web@%s`\n\n' "$REGISTRY" "$WEB_DIGEST"
+            printf 'URL: https://%s\n' "$WEB_HOST"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Clear registry credentials
+        if: always()
+        shell: bash
+        env:
+          REGISTRY: ${{ steps.target.outputs.registry }}
+        run: |
+          if [[ -n "$REGISTRY" ]]; then docker logout "$REGISTRY"; fi

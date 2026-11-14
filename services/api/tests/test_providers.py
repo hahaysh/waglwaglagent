@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from app.providers import Providers, zero_pricing
+from app.providers import ProviderError, Providers, zero_pricing
 
 
 def test_free_pricing_fails_closed():
@@ -21,6 +21,45 @@ def test_free_pricing_fails_closed():
         {"prompt": "0", "completion": "0", "new_fee": None},
     ]:
         assert not zero_pricing(pricing)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,host", [
+    ("openai", "api.openai.com"), ("anthropic", "api.anthropic.com"),
+    ("gemini", "generativelanguage.googleapis.com"),
+])
+async def test_key_verification_never_generates_or_claims_free_usage(provider, host):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        assert request.method == "GET" and request.url.host == host
+        return httpx.Response(200, json={"models" if provider == "gemini" else "data": []})
+
+    providers = Providers()
+    await providers.client.aclose()
+    providers.client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        result = await providers.validate(provider, "test-secret")
+        assert result["status"] == "unverified"
+        assert result["source"] == "billing_tier_unknown"
+        assert len(requests) == 1
+    finally:
+        await providers.close()
+
+
+@pytest.mark.asyncio
+async def test_key_permission_error_is_not_mislabeled_invalid_key():
+    providers = Providers()
+    await providers.client.aclose()
+    providers.client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(403)
+    ))
+    try:
+        with pytest.raises(ProviderError, match="provider_permission_denied"):
+            await providers.validate("openai", "test-secret")
+    finally:
+        await providers.close()
 
 
 @pytest.mark.asyncio
