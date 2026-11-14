@@ -78,3 +78,61 @@ App Service에는 환경·App Configuration endpoint/레이블 등 부트스트�
 컨테이너 실행에 필요한 플랫폼 설정만 둡니다.
 기존 전체 호스팅 IaC는 별도 파일럿 리소스 그룹을 생성하므로 **현재 로컬 전환을 위해
 전체 배포할 필요가 없습니다**. 실제 호스팅 배포 전 대상·예산·네트워크를 확인하세요.
+
+### 기존 `waglwaglagent` Web App
+
+배포 대상은 `waglwaglagent_rg/waglwaglagent`이고 운영 주소는
+`https://waglwaglagent-echmdef2d8ejb9fb.koreacentral-01.azurewebsites.net`입니다.
+앱 코드는 GitHub Actions에서만 업로드합니다. 아래 설정 명령은 코드를 업로드하거나
+워크플로를 실행하지 않지만 런타임 설정 변경으로 웹앱이 재시작될 수 있습니다.
+
+```powershell
+.venv\Scripts\python.exe scripts\configure_webapp.py `
+  --subscription "<subscription-id>" `
+  --tenant "<tenant-id>" `
+  --resource-group "waglwaglagent_rg"
+```
+
+- Web App는 Node 24 LTS와 `node server.js`를 사용하고, 런타임 호스트를 `0.0.0.0`으로 둡니다.
+  GitHub에서 완성한 ZIP을 사용하므로 Oryx/SCM 원격 빌드는 끕니다.
+- App settings에는 `WAGL_ENVIRONMENT=production`, 기존 store endpoint,
+  `WAGL_APP_CONFIG_LABEL=production-web`과 실행 플랫폼 설정만 둡니다.
+- 웹의 시스템 할당 Managed Identity에는 해당 store의 App Configuration Data Reader,
+  아래 네 개 운영 secret **각각의 범위에만** Key Vault Secrets User를 부여합니다.
+  사용자 Copilot 토큰·로컬 비밀 전체를 읽을 권한은 부여하지 않습니다.
+- 전용 `waglwaglagent-github-deploy` Managed Identity에는 웹앱 범위 Website Contributor와
+  store 범위 App Configuration Data Reader만 부여합니다. GitHub `azure-production`
+  환경은 `main`만 허용하며 암호 없는 OIDC를 사용합니다.
+
+`production-web`은 다음 네이티브 Key Vault 참조를 사용합니다.
+
+| 설정 | Key Vault secret |
+|---|---|
+| `AUTH_SECRET` | `waglwaglagent-production-auth-secret` |
+| `WAGL_INTERNAL_SECRET` | `waglwaglagent-production-internal-secret` |
+| `AUTH_GITHUB_ID` | `waglwaglagent-production-github-id` |
+| `AUTH_GITHUB_SECRET` | `waglwaglagent-production-github-secret` |
+
+설정 도구는 처음 두 비밀만 없을 때 생성하고 재실행 시 보존합니다.
+GitHub 앱 ID·비밀은 추측하거나 로컬 OAuth 앱에서 복사하지 않습니다.
+로컬 레이블·비밀·암호화 키·DB는 변경하지 않습니다.
+
+### 최초 자동 배포 활성화 전
+
+1. 별도로 승인한 운영 FastAPI/PostgreSQL/Redis를 준비합니다. API의 운영 설정은
+   `production-api`에 두고, 웹과 같은 운영 `WAGL_INTERNAL_SECRET`을 참조합니다.
+   실제 HTTPS API origin을 `production-web`의 `WAGL_API_URL`에 설정합니다.
+   웹 자기 자신이나 localhost를 입력하지 않습니다.
+2. 운영 전용 GitHub OAuth 앱의 callback을
+   `<운영 웹 주소>/api/auth/callback/github`로 등록합니다. 해당 앱의 실제 ID·비밀을
+   위의 production secret 두 개에 저장합니다. 브라우저·명령 인자·Git에 노출하지 마세요.
+   Copilot 연결 앱도 `<운영 웹 주소>/api/connections/copilot/callback`에 맞게
+   별도 준비하고 그 설정은 운영 API 레이블에서 참조합니다.
+3. 실제 등록과 secret 저장을 확인한 뒤에만 `production-web`의
+   `WAGL_OAUTH_CALLBACK_CONFIRMED`를 `true`로 변경합니다. 기본값은 `false`입니다.
+4. 설정 PR을 `main`에 병합하면 검증 → 빌드 → 사전 검사 → 업로드 순으로 진행합니다.
+   API URL·OAuth 확인이 없으면 업로드 전에 실패합니다. Key Vault 실제 조회 권한과
+   로그인·대화의 최종 검증은 첫 배포 이후 별도로 수행합니다.
+
+현재 설정만으로 운영 API/DB/Redis가 생성되거나 사이트가 배포되지는 않습니다.
+추가 유료 서비스를 암묵적으로 생성하지 않습니다.

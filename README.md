@@ -209,30 +209,27 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 
 ## GitHub Actions 배포
 
-워크플로 파일은 작성됐지만 **Azure 리소스·OIDC 연결 및 최초 push 전에는 배포가 활성화되지 않습니다.**
-
 - `Validate`: `main` 대상 PR과 수동 실행에서 API lint/테스트, 웹 lint/단위/E2E/빌드 및 런타임 의존성 감사를 수행합니다.
-- `Deploy Azure Web Apps`: `main`의 모든 push(직접 push·PR 병합)와 `main`에서의 수동 실행으로 시작합니다. 동일한 검증을 통과한 뒤 웹·API 이미지를 ACR에 저장하고 digest로 API → 웹 순서로 배포합니다.
-- Azure 리소스 이름은 모두 `waglwaglagent`로 시작합니다. 현재 대상은 `waglwaglagent-6d0f-rg`의 두 Web App과 `waglwaglagent6d0facr`입니다. 다른 이름으로 프로비저닝하면 배포 워크플로의 대상도 함께 수정하세요.
-- GitHub의 `azure-pilot` Environment에 `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` **변수**를 설정해야 합니다. Azure 클라이언트 비밀이나 publish profile은 사용하지 않습니다.
-- 배포 ID의 federated credential은 GitHub issuer `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange`, subject `repo:hahaysh/waglwaglagent:environment:azure-pilot`에 연결해야 합니다. GitHub Environment의 배포 브랜치도 `main`으로 제한하세요.
-- 배포 ID에는 해당 ACR의 `AcrPush`, 두 Web App 범위의 배포 권한이 필요합니다. 런타임 ID에는 `AcrPull`과 필요한 Key Vault 접근 권한을 별도로 부여합니다. 배포 ID에 구독 Owner 권한을 부여하지 마세요. Web App 설정 변경 권한은 민감한 앱 설정 접근도 허용할 수 있으므로 신뢰된 워크플로에서만 사용하세요.
-- DB·Redis·암호화 키·OAuth 설정은 먼저 Azure에 구성해야 합니다. 워크플로는 인프라를 생성하거나 비밀 값을 업로드하지 않습니다. API 컨테이너는 시작할 때 Alembic 마이그레이션을 적용하므로 하위 호환되는 마이그레이션을 사용해야 합니다.
-- 동시 배포는 직렬화하며 진행 중인 배포를 취소하지 않습니다. 실패 시 workflow가 실패하고 이전 컨테이너 설정을 실행 요약에 남깁니다. 자동 롤백과 DB 마이그레이션 역적용은 수행하지 않습니다.
-- 배포 후 API `/health`, 웹 `/`, 미인증 BFF의 401 응답을 검사합니다. 이는 OAuth 성공·실제 AI 추론·정확한 컨테이너 digest 가동을 모두 증명하지는 않으므로 출시 파일럿에서 추가 검증해야 합니다.
+- `Deploy waglwaglagent`: `main`의 모든 push(직접 push·PR 병합)와 `main`에서의 수동 실행으로 시작합니다. 검증 후 Ubuntu/Node 24에서 Next.js standalone을 빌드하고 ZIP을 기존 **`waglwaglagent_rg/waglwaglagent`** Linux Web App에 배포합니다. 이 워크플로는 웹 프런트만 배포하며 Docker·ACR을 사용하지 않습니다.
+- GitHub의 `azure-production` Environment는 `main` 브랜치만 허용합니다. `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_WEB_APP`, `AZURE_WEB_APP_URL`, `WAGL_APP_CONFIG_ENDPOINT`는 **비밀이 아닌 변수**입니다. 클라이언트 비밀·publish profile은 사용하지 않습니다.
+- OIDC subject는 `repo:hahaysh/waglwaglagent:environment:azure-production`, issuer는 `https://token.actions.githubusercontent.com`, audience는 `api://AzureADTokenExchange`입니다. 전용 배포 ID는 대상 Web App의 Website Contributor와 App Configuration Data Reader만 가지며 Key Vault secret을 직접 조회하지 않습니다.
+- Web App는 Node 24 LTS·`node server.js`로 실행합니다. 런타임 Managed Identity가 `production-web` 레이블과 운영용 Key Vault secret을 읽습니다. 운영 비밀은 빌드·ZIP·Actions 변수에 포함하지 않습니다.
+- **첫 배포 전제:** 운영 FastAPI/PostgreSQL/Redis, 실제 `WAGL_API_URL`, 운영 GitHub OAuth 앱·callback이 필요합니다. 업로드 전 사전 검사가 운영 URL·네이티브 Key Vault 참조·OAuth 확인 플래그·API `/health`를 검사합니다. 준비되지 않으면 명시적으로 실패하고 ZIP을 업로드하지 않습니다.
+- 동시 배포는 직렬화하고 진행 중인 배포를 취소하지 않습니다. 배포 후 웹 `/`와 미인증 BFF 401 응답을 검사합니다. 자동 롤백은 없으며 이 검사가 실제 OAuth 로그인·AI 추론까지 증명하지는 않습니다.
+- 기존 리소스 설정 재적용은 [설정 도구](scripts/configure_webapp.py), 값·권한과 최초 활성화 절차는 [중앙 설정 문서](docs/central-configuration.md)를 참고하세요. 설정 도구는 앱 코드를 배포하거나 Actions를 실행하지 않습니다.
 
-현재 워크플로는 로컬에 작성한 상태이며 GitHub에 업로드한 뒤 원격 실행을 검증해야 합니다. 파일 작성은 GitHub 업로드나 Azure 배포 완료를 의미하지 않습니다.
+이번 구성은 배포를 시작하지 않고 별도 브랜치에서 검증합니다. `main`에 병합된 뒤 자동 배포가 시작되며, 운영 준비 조건이 부족하면 사전 검사에서 중단됩니다.
 
-### Azure 인프라 준비
+### 별도 전체 인프라 템플릿
 
-[인프라 템플릿](infra/main.bicep)은 구독 범위에서 `waglwaglagent-6d0f-rg`와 승인한 Web App·PostgreSQL·Managed Redis·ACR·Key Vault·모니터링·배포 ID를 생성하도록 작성했습니다. [공개 매개변수](infra/main.parameters.json)에는 비밀 값을 넣지 않습니다. 현재는 Bicep 컴파일과 계획 일치 검사만 완료했으며 실제 리소스 생성은 별도 승인 전입니다.
+[인프라 템플릿](infra/main.bicep)은 별도 컨테이너 기반 파일럿 설계입니다. 위의 기존 `waglwaglagent` Web App용 ZIP 워크플로와 대상·배포 방식이 다릅니다. 현재 웹앱을 설정하기 위해 실행하지 마세요. 템플릿은 구독 범위에서 `waglwaglagent-6d0f-rg`와 Web App·PostgreSQL·Managed Redis·ACR·Key Vault·모니터링·배포 ID를 생성하도록 작성했습니다. [공개 매개변수](infra/main.parameters.json)에는 비밀 값을 넣지 않습니다. 실제 리소스 생성은 별도 승인 전입니다.
 
 - 최초 단계는 존재가 확인된 공개 정적 이미지의 고정 digest를 사용합니다. 이 화면은 AI 앱이 아닌 부트스트랩용 임시 화면입니다.
 - 비밀 값은 배포 시 secure 매개변수로 전달합니다. 내부 서명 비밀, 암호화 키, Auth.js 비밀과 DB 암호를 한 번 생성해 안전하게 보관하고 재배포 때 재사용해야 합니다. 암호화 키가 바뀌면 기존 개인 키를 복호화할 수 없습니다.
 - Key Vault는 RBAC 역할 할당 후 별도 모듈에서 비밀 값을 저장합니다. 모든 앱 참조는 `waglwaglagent-`로 시작하는 secret 이름을 사용합니다. PostgreSQL URL은 `sslmode=require`, Redis URL은 `rediss`와 URL-인코딩한 자격 증명을 사용하며 값을 출력하지 않습니다.
 - PostgreSQL에는 `waglwaglagent` DB를 만듭니다. 최초 방화벽은 닫혀 있으며, 배포 출력의 API outbound IP를 `postgresOutboundIpRanges`로 전달해 다시 적용해야 합니다. IP 변경 시 새 허용목록을 검증하고 이전 규칙도 정리해야 합니다.
 - GitHub OAuth 설정이 아직 없으면 OAuth secret과 해당 참조를 만들지 않으며 로그인은 비활성 상태입니다. 웹의 실제 HTTPS 주소로 앱을 등록한 후 `authGithubId`와 secure `authGithubSecret`을 전달해 다시 적용합니다.
-- ACR에 실제 이미지가 준비되면 `usePlaceholderImages=false`와 두 이미지 태그로 템플릿을 적용하거나 GitHub Actions로 실제 앱을 배포합니다. Actions는 API·웹의 실제 포트와 health 경로도 함께 전환합니다.
+- 이 별도 설계를 사용하려면 이미지 빌드·API/웹 배포 파이프라인도 따로 준비해야 합니다. 현재 Actions는 이 파일럿의 ACR·API·웹을 배포하지 않습니다.
 - `enableDiagnostics`는 초기에는 `false`입니다. 실제 앱을 배포한 뒤 필요한 로그만 활성화하세요. 워크스페이스 일일 한도는 비용 완화 장치이며 초과 과금을 완전히 방지하는 보장은 아닙니다.
 - OIDC subject는 `repo:hahaysh/waglwaglagent:environment:azure-pilot`입니다. 템플릿 출력의 `deploymentClientId`, Azure tenant와 구독 ID를 GitHub Environment 변수로 설정하고, 해당 Environment의 허용 브랜치를 `main`으로 제한해야 합니다.
 
