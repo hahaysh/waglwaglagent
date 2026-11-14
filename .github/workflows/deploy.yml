@@ -92,6 +92,7 @@ jobs:
             fi
           done
       - name: Sign in with GitHub OIDC
+        id: azure-login
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
@@ -111,7 +112,20 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$AZURE_WEB_APP" \
             --src-path "$RUNNER_TEMP/waglwaglagent-release/waglwaglagent.zip" \
-            --type zip --clean true --restart true --output none
+            --type zip --clean true --restart false --track-status false --output none
+      - name: Activate standalone startup after successful upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config set \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_WEB_APP" \
+            --startup-file "node server.js" --output none
+          az webapp restart \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_WEB_APP" --output none
       - name: Verify the deployed release
         shell: bash
         run: |
@@ -127,5 +141,5 @@ jobs:
           printf '### waglwaglagent release\nCommit: `%s`\n\nURL: %s\n' \
             "$GITHUB_SHA" "$AZURE_WEB_APP_URL" >> "$GITHUB_STEP_SUMMARY"
       - name: Sign out of Azure
-        if: always()
+        if: always() && steps.azure-login.outcome == 'success'
         run: az logout

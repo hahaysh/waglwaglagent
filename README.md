@@ -213,13 +213,13 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 - `Validate`: `main` 대상 PR과 수동 실행에서 API lint/테스트, 웹 lint/단위/E2E/빌드 및 런타임 의존성 감사를 수행합니다.
 - `Deploy waglwaglagent`: `main`의 모든 push(직접 push·PR 병합)와 `main`에서의 수동 실행으로 시작합니다. 검증 후 Ubuntu/Node 24에서 Next.js standalone을 빌드하고 ZIP을 기존 **`waglwaglagent_rg/waglwaglagent`** Linux Web App에 배포합니다. 이 워크플로는 웹 프런트만 배포하며 Docker·ACR을 사용하지 않습니다.
 - GitHub의 `azure-production` Environment는 `main` 브랜치만 허용합니다. `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_WEB_APP`, `AZURE_WEB_APP_URL`, `WAGL_APP_CONFIG_ENDPOINT`는 **비밀이 아닌 변수**입니다. 클라이언트 비밀·publish profile은 사용하지 않습니다.
-- OIDC subject는 `repo:hahaysh/waglwaglagent:environment:azure-production`, issuer는 `https://token.actions.githubusercontent.com`, audience는 `api://AzureADTokenExchange`입니다. 전용 배포 ID는 대상 Web App의 Website Contributor와 App Configuration Data Reader만 가지며 Key Vault secret을 직접 조회하지 않습니다.
-- Web App는 Node 24 LTS·`node server.js`로 실행합니다. 런타임 Managed Identity가 `production-web` 레이블과 운영용 Key Vault secret을 읽습니다. 운영 비밀은 빌드·ZIP·Actions 변수에 포함하지 않습니다.
+- OIDC subject는 GitHub OIDC API의 `sub_claim_prefix`에 `:environment:azure-production`을 붙입니다. 현재 저장소는 불변 ID를 포함한 `repo:hahaysh@24690076/waglwaglagent@1444424609:environment:azure-production`을 사용합니다. issuer는 `https://token.actions.githubusercontent.com`, audience는 `api://AzureADTokenExchange`입니다. 전용 배포 ID는 대상 Web App의 Website Contributor와 App Configuration Data Reader만 가지며 Key Vault secret을 직접 조회하지 않습니다.
+- Web App는 Node 24 LTS를 사용하고, Actions에서 ZIP 업로드가 성공한 뒤에만 `node server.js` 시작 명령을 적용합니다. 미배포 앱에 이 명령을 먼저 지정하면 파일이 없어 503이 발생합니다. 런타임 Managed Identity가 `production-web` 레이블과 운영용 Key Vault secret을 읽습니다. 운영 비밀은 빌드·ZIP·Actions 변수에 포함하지 않습니다.
 - **첫 배포 전제:** 운영 FastAPI/PostgreSQL/Redis, 실제 `WAGL_API_URL`, 운영 GitHub OAuth 앱·callback이 필요합니다. 업로드 전 사전 검사가 운영 URL·네이티브 Key Vault 참조·OAuth 확인 플래그·API `/health`를 검사합니다. 준비되지 않으면 명시적으로 실패하고 ZIP을 업로드하지 않습니다.
 - 동시 배포는 직렬화하고 진행 중인 배포를 취소하지 않습니다. 배포 후 웹 `/`와 미인증 BFF 401 응답을 검사합니다. 자동 롤백은 없으며 이 검사가 실제 OAuth 로그인·AI 추론까지 증명하지는 않습니다.
 - 기존 리소스 설정 재적용은 [설정 도구](scripts/configure_webapp.py), 값·권한과 최초 활성화 절차는 [중앙 설정 문서](docs/central-configuration.md)를 참고하세요. 설정 도구는 앱 코드를 배포하거나 Actions를 실행하지 않습니다.
 
-이번 구성은 배포를 시작하지 않고 별도 브랜치에서 검증합니다. `main`에 병합된 뒤 자동 배포가 시작되며, 운영 준비 조건이 부족하면 사전 검사에서 중단됩니다.
+`main` 변경으로 자동 배포가 시작되며, 운영 준비 조건이 부족하면 사전 검사에서 중단됩니다. 첫 배포 전 Azure 기본 안내 페이지는 실제 앱 배포 완료를 의미하지 않습니다.
 
 ### 별도 전체 인프라 템플릿
 

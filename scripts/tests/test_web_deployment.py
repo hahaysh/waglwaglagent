@@ -17,6 +17,7 @@ def load_script(name):
 
 packager = load_script("package_web")
 preflight = load_script("check_web_deployment")
+configuration = load_script("configure_webapp")
 
 
 def production_settings():
@@ -108,3 +109,32 @@ def test_target_without_managed_identity_is_rejected_explicitly(monkeypatch):
     })
     with pytest.raises(ValueError, match="Managed Identity"):
         preflight.main()
+
+
+@pytest.mark.parametrize("prefix,immutable", [
+    ("repo:example@123/test@456", True),
+    ("repo:example/test", False),
+])
+def test_federation_uses_github_reported_subject_prefix(monkeypatch, prefix, immutable):
+    def github_settings(executable, *args):
+        assert executable == "gh"
+        assert args == ("api", "repos/example/test/actions/oidc/customization/sub")
+        return {
+            "use_default": True, "use_immutable_subject": immutable, "sub_claim_prefix": prefix,
+        }
+
+    monkeypatch.setattr(configuration, "command", github_settings)
+    assert configuration.github_oidc_subject("example/test") == (
+        prefix + ":environment:azure-production"
+    )
+
+
+@pytest.mark.parametrize("settings", [
+    {"use_default": False, "sub_claim_prefix": "custom-subject"},
+    {"use_default": True},
+    {"use_default": True, "sub_claim_prefix": ""},
+])
+def test_unknown_or_custom_oidc_template_does_not_create_incorrect_trust(monkeypatch, settings):
+    monkeypatch.setattr(configuration, "command", lambda *args: settings)
+    with pytest.raises(RuntimeError, match="default OIDC subject prefix"):
+        configuration.github_oidc_subject("example/test")

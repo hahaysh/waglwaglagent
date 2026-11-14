@@ -93,8 +93,10 @@ App Service에는 환경·App Configuration endpoint/레이블 등 부트스트�
   --resource-group "waglwaglagent_rg"
 ```
 
-- Web App는 Node 24 LTS와 `node server.js`를 사용하고, 런타임 호스트를 `0.0.0.0`으로 둡니다.
-  GitHub에서 완성한 ZIP을 사용하므로 Oryx/SCM 원격 빌드는 끕니다.
+- Web App는 Node 24 LTS를 사용하고, 런타임 호스트를 `0.0.0.0`으로 둡니다.
+  설정 도구는 기존 시작 명령을 바꾸지 않습니다. Actions가 ZIP 업로드를 성공적으로
+  마친 뒤에만 `node server.js`를 적용하고 재시작합니다. 앱 파일 없이 이 명령을
+  미리 지정하면 503이 발생합니다. GitHub에서 완성한 ZIP을 사용하므로 Oryx/SCM 원격 빌드는 끕니다.
 - App settings에는 `WAGL_ENVIRONMENT=production`, 기존 store endpoint,
   `WAGL_APP_CONFIG_LABEL=production-web`과 실행 플랫폼 설정만 둡니다.
 - 웹의 시스템 할당 Managed Identity에는 해당 store의 App Configuration Data Reader,
@@ -103,6 +105,9 @@ App Service에는 환경·App Configuration endpoint/레이블 등 부트스트�
 - 전용 `waglwaglagent-github-deploy` Managed Identity에는 웹앱 범위 Website Contributor와
   store 범위 App Configuration Data Reader만 부여합니다. GitHub `azure-production`
   환경은 `main`만 허용하며 암호 없는 OIDC를 사용합니다.
+  subject는 GitHub OIDC 설정 API의 `sub_claim_prefix`를 사용하므로 저장소의 불변 ID를
+  포함한 형식도 지원합니다. 실제 prefix를 조회할 수 없거나 사용자 지정 템플릿이면
+  예전 이름 형식으로 추측하지 않고 설정을 중단합니다.
 
 `production-web`은 다음 네이티브 Key Vault 참조를 사용합니다.
 
@@ -130,9 +135,18 @@ GitHub 앱 ID·비밀은 추측하거나 로컬 OAuth 앱에서 복사하지 않
    별도 준비하고 그 설정은 운영 API 레이블에서 참조합니다.
 3. 실제 등록과 secret 저장을 확인한 뒤에만 `production-web`의
    `WAGL_OAUTH_CALLBACK_CONFIRMED`를 `true`로 변경합니다. 기본값은 `false`입니다.
-4. 설정 PR을 `main`에 병합하면 검증 → 빌드 → 사전 검사 → 업로드 순으로 진행합니다.
+4. `main`을 변경하면 검증 → 빌드 → 사전 검사 → 업로드 → 시작 명령 적용 순으로 진행합니다.
    API URL·OAuth 확인이 없으면 업로드 전에 실패합니다. Key Vault 실제 조회 권한과
    로그인·대화의 최종 검증은 첫 배포 이후 별도로 수행합니다.
 
 현재 설정만으로 운영 API/DB/Redis가 생성되거나 사이트가 배포되지는 않습니다.
 추가 유료 서비스를 암묵적으로 생성하지 않습니다.
+
+### 미배포 상태의 503 확인
+
+`server.js`가 없는 웹앱에 `node server.js`가 지정되면 프로세스가 반복 종료됩니다.
+Azure의 `Running` 표시는 리소스 상태이지 앱 요청 성공을 의미하지 않습니다.
+배포 이력과 시작 로그, 실제 배포 디렉터리를 먼저 확인하세요.
+처음 배포하지 않은 앱에 잘못 지정한 시작 명령만 해제하면 Azure 기본 안내 페이지로
+돌아갈 수 있지만, 이는 waglwaglagent가 배포되었다는 뜻이 아닙니다.
+실제 배포는 위 운영 준비 조건을 충족한 뒤 Actions로 진행합니다.

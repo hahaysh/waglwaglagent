@@ -44,7 +44,16 @@ def assign_role(args, principal: str, role: str, scope: str):
        "--assignee-principal-type", "ServicePrincipal", "--role", role, "--scope", scope)
 
 
+def github_oidc_subject(repository: str) -> str:
+    settings = command("gh", "api", f"repos/{repository}/actions/oidc/customization/sub")
+    prefix = settings.get("sub_claim_prefix")
+    if settings.get("use_default") is not True or not isinstance(prefix, str) or not prefix:
+        raise RuntimeError("GitHub must expose its default OIDC subject prefix; check OIDC settings")
+    return f"{prefix}:environment:{ENVIRONMENT}"
+
+
 def configure(args):
+    subject = github_oidc_subject(args.repository)
     app = az(args, "webapp", "show", "--resource-group", args.resource_group, "--name", args.app)
     if app.get("kind") != "app,linux":
         raise RuntimeError("Only existing Linux code Web Apps are supported")
@@ -121,7 +130,7 @@ def configure(args):
        "--resource-group", args.resource_group, "--identity-name", deploy_identity["name"],
        "--name", "github-main-production",
        "--issuer", "https://token.actions.githubusercontent.com",
-       "--subject", f"repo:{args.repository}:environment:{ENVIRONMENT}",
+       "--subject", subject,
        "--audiences", "api://AzureADTokenExchange")
     assign_role(args, deploy_identity["principalId"], WEBSITE_ROLE, app_id)
     assign_role(args, deploy_identity["principalId"], READER_ROLE, config["id"])
@@ -130,7 +139,6 @@ def configure(args):
         configuration = Path(directory) / "runtime.json"
         configuration.write_text(json.dumps({
             "linuxFxVersion": "NODE|24-lts",
-            "appCommandLine": "node server.js",
             "alwaysOn": True,
             "ftpsState": "Disabled",
             "http20Enabled": True,
