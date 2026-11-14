@@ -26,9 +26,9 @@ resource runtimeWebKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   properties: { roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUser), principalId: webPrincipalId, principalType: 'ServicePrincipal' }
 }
 resource runtimeApiKv 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVaultId, apiPrincipalId, kvSecretsUser)
+  name: guid(keyVaultId, apiPrincipalId, kvSecretsOfficer)
   scope: keyVault
-  properties: { roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUser), principalId: apiPrincipalId, principalType: 'ServicePrincipal' }
+  properties: { roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsOfficer), principalId: apiPrincipalId, principalType: 'ServicePrincipal' }
 }
 resource deployAcr 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(acrId, deployIdentityPrincipalId, acrPush)

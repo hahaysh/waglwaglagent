@@ -14,6 +14,11 @@ param enableDiagnostics bool = false
 param authGithubId string = ''
 param webImageTag string = 'pilot-placeholder'
 param apiImageTag string = 'pilot-placeholder'
+param configurationStoreName string = 'waglwaglagent-config'
+param configurationResourceGroupName string = 'waglwaglagent_rg'
+param copilotClientId string = ''
+@secure()
+param copilotClientSecret string = ''
 
 @secure()
 param postgresAdminPassword string
@@ -140,12 +145,24 @@ module appSettings './modules/app-settings.bicep' = {
   params: {
     webName: webName
     apiName: apiName
-    kvName: kvName
+    appConfigurationEndpoint: centralSettings.outputs.endpoint
     acrLoginServer: acr.outputs.loginServer
-    githubAuthConfigured: !empty(authGithubId) && !empty(authGithubSecret)
     usePlaceholderImages: usePlaceholderImages
+  }
+}
+module centralSettings './modules/central-settings.bicep' = {
+  name: 'waglwaglagent-central-settings'
+  scope: resourceGroup(configurationResourceGroupName)
+  dependsOn: [secrets]
+  params: {
+    name: configurationStoreName
+    kvName: kvName
     webHostName: web.outputs.defaultHostName
     apiHostName: api.outputs.defaultHostName
+    githubAuthConfigured: !empty(authGithubId) && !empty(authGithubSecret)
+    copilotAuthConfigured: !empty(copilotClientId) && !empty(copilotClientSecret)
+    webPrincipalId: web.outputs.principalId
+    apiPrincipalId: api.outputs.principalId
   }
 }
 module roles './modules/role-assignments.bicep' = {
@@ -176,6 +193,8 @@ module secrets './modules/secrets.bicep' = {
     authSecret: authSecret
     authGithubId: authGithubId
     authGithubSecret: authGithubSecret
+    copilotClientId: copilotClientId
+    copilotClientSecret: copilotClientSecret
   }
 }
 module diagnostics './modules/diagnostics.bicep' = if (enableDiagnostics) {

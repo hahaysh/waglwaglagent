@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -21,6 +21,7 @@ from app.models import Conversation, Credential, Message, OAuthAttempt, Run
 from app.providers import ProviderError
 from app.routing import Candidate, Failure
 from app.security import decrypt_oauth
+from app.vault import SecretStoreError
 
 
 @pytest.fixture
@@ -92,6 +93,38 @@ def add_key(client, **overrides):
         assert response.status_code == 200
         result = response.json()
     return result
+
+
+def test_vault_connection_lifecycle_and_fail_closed_writes(client, monkeypatch):
+    settings = get_settings()
+    settings.key_vault_url = "https://test.vault.azure.net/"
+    vault, secrets = Mock(), {}
+
+    def store(name, value, **_):
+        secrets[name] = value
+        return SimpleNamespace(properties=SimpleNamespace(version="a" * 32))
+
+    def remove(name):
+        secrets.pop(name)
+        return Mock()
+
+    vault.set_secret.side_effect = store
+    vault.get_secret.side_effect = lambda name, **_: SimpleNamespace(value=secrets[name])
+    vault.begin_delete_secret.side_effect = remove
+    monkeypatch.setattr("app.security.secret_client", lambda: vault)
+    key = add_key(client)
+    with Session(app.state.engine) as database:
+        assert database.get(Credential, key["id"]).encrypted_key.startswith("kv://")
+    assert client.post(f"/credentials/{key['id']}/verify", headers=headers()).status_code == 200
+    assert client.delete(f"/credentials/{key['id']}", headers=headers()).status_code == 204
+    assert not secrets
+    vault.set_secret.side_effect = SecretStoreError("test vault unavailable")
+    response = client.post("/credentials", headers=headers(), json={
+        "provider": "openai", "label": "Vault failure", "api_key": "private-vault-test-key",
+    })
+    assert response.status_code == 503
+    assert response.json() == {"detail": "secret_store_unavailable"}
+    assert client.get("/credentials", headers=headers()).json() == []
 
 
 def test_authentication_and_key_isolation(client):

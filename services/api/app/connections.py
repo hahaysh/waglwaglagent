@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -225,7 +226,9 @@ async def complete_connection(
                 auth_type="oauth", secret_format="oauth_v1",
             )
             database.add(credential)
-        credential.encrypted_key = encrypt_oauth(tokens, owner, credential.id)
+        credential.encrypted_key = await asyncio.to_thread(
+            encrypt_oauth, tokens, owner, credential.id,
+        )
         credential.scopes = tokens["scopes"]
         credential.expires_at = tokens.get("expires_at")
         credential.auth_status = "authenticated"
@@ -252,7 +255,9 @@ async def complete_connection(
 async def verify_copilot(
     client: httpx.AsyncClient, credential: Credential, database: Session,
 ) -> dict:
-    token = decrypt_oauth(credential.encrypted_key, credential.owner_id, credential.id)
+    token = await asyncio.to_thread(
+        decrypt_oauth, credential.encrypted_key, credential.owner_id, credential.id,
+    )
     if credential.expires_at and credential.expires_at <= (
         datetime.now(UTC) + timedelta(seconds=60)
     ).isoformat():
@@ -286,7 +291,9 @@ async def verify_copilot(
                 Credential.id == credential.id, Credential.owner_id == credential.owner_id,
                 Credential.token_version == version,
             ).values(
-                encrypted_key=encrypt_oauth(token, credential.owner_id, credential.id),
+                encrypted_key=await asyncio.to_thread(
+                    encrypt_oauth, token, credential.owner_id, credential.id,
+                ),
                 expires_at=token["expires_at"], scopes=token["scopes"], token_version=version + 1,
             ))
             if changed.rowcount != 1:

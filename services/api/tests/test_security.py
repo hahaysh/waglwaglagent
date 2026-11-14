@@ -54,5 +54,5 @@ def test_encryption_is_bound_to_user_and_record():
 def test_production_requires_shared_infrastructure(monkeypatch):
     monkeypatch.setenv("WAGL_ENVIRONMENT", "production")
     get_settings.cache_clear()
-    with pytest.raises(ValueError, match="PostgreSQL and Redis"):
+    with pytest.raises(ValueError, match="Production requires Azure Key Vault"):
         get_settings()

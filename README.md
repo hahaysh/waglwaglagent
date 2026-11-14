@@ -17,12 +17,15 @@
 
 Windows PowerShell, Python 3.12, Node.js 22.18 이상 또는 24 LTS를 사용합니다. 현재 검증 환경은 Python 3.12와 Node.js 26입니다. 테스트의 직접 TypeScript 실행에는 최신 Node가 필요합니다.
 
-저장소 루트에서 API 의존성과 비밀 설정을 준비합니다. `init-local.ps1`은 기존 환경 파일을 덮어쓰지 않으며 비밀 값을 출력하지 않습니다.
+운영 비밀은 Key Vault, 일반 설정은 `waglwaglagent-config` App Configuration에서 읽습니다.
+초기 운영자 설정·기존 데이터 이전은 [중앙 설정 안내](docs/central-configuration.md)를 따르세요.
+`init-local.ps1`은 이미 준비된 중앙 설정에 접근하는 부트스트랩만 생성하며 기존 환경 파일을 덮어쓰지 않습니다.
 
 ```powershell
 py -3.12 -m venv .venv
 .venv/Scripts/python -m pip install --require-hashes -r services/api/requirements.lock
-./scripts/init-local.ps1
+az login --tenant "<tenant-id>"
+.\scripts\init-local.ps1 -TenantId "<tenant-id>"
 .venv/Scripts/python -m uvicorn app.main:app --app-dir services/api --host 127.0.0.1 --port 8000
 ```
 
@@ -36,7 +39,7 @@ npm run dev -- --hostname 127.0.0.1 --port 3000
 
 웹: <http://localhost:3000> · API 상태: <http://127.0.0.1:8000/health>
 
-기본 SQLite 데이터는 루트의 `.local/wagl.db`에 저장됩니다. 로컬 모드는 API 한 프로세스 전용이며 다중 서버 배포에 사용하지 않습니다. 포트가 사용 중이라면 초기화 시 `-Port 3001`을 지정하고 웹 실행 포트도 맞추세요. 이미 설정한 경우 `AUTH_URL`, `WAGL_PUBLIC_URL`, OAuth callback과 실행 포트를 함께 변경합니다.
+기본 SQLite 데이터는 루트의 `.local/wagl.db`에 저장됩니다. 제목·메시지·첨부·연결 이름은 암호화하고, 연결 토큰은 Key Vault 참조로 저장합니다. 로컬 모드는 API 한 프로세스 전용이며 다중 서버 배포에 사용하지 않습니다. 포트를 변경하면 App Configuration의 `AUTH_URL`, `WAGL_PUBLIC_URL`, OAuth callback과 실행 포트를 함께 변경하고 서버를 재시작합니다.
 
 ### GitHub OAuth
 
@@ -44,7 +47,7 @@ GitHub **Settings → Developer settings → OAuth Apps**에서 앱을 등록합
 
 - Homepage URL: `http://localhost:3000`
 - Authorization callback URL: `http://localhost:3000/api/auth/callback/github`
-- 생성한 Client ID와 Client secret을 `apps/web/.env.local`의 `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`에 직접 입력하고 웹 서버를 재시작합니다.
+- 생성한 Client ID와 Client secret을 Key Vault에 등록하고 App Configuration `local-web`의 `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`을 해당 비밀의 네이티브 참조로 설정한 뒤 웹을 재시작합니다. 환경 파일에 비밀을 직접 넣지 않습니다.
 
 비밀 값은 채팅으로 전달하지 마세요. OAuth가 설정되지 않아도 화면은 열리지만 로그인·키 등록·AI 전송은 우회되지 않습니다. Auth.js는 버전을 고정한 v5 beta를 사용하므로 공개 출시 전 별도 안정성 검토가 필요합니다.
 
@@ -161,7 +164,7 @@ Claude.ai 소비자 로그인·구독 토큰을 제3자 앱에서 수집·중개
 - **연결 삭제**: 이 사이트의 암호화 비밀과 연결을 삭제하며 대화 이력 삭제와는 별개입니다. Copilot은 GitHub 토큰 철회도 시도합니다. 철회 실패 안내가 나오면 GitHub **Settings → Applications → Authorized OAuth Apps**에서 직접 철회하세요.
 - API 키는 다른 앱에서도 쓰일 수 있으므로 이 사이트에서 삭제해도 발급처의 키 자체를 폐기하지 않습니다. 완전 폐기가 필요하면 발급처 API Keys에서 직접 삭제하세요.
 
-연결 메타데이터와 사용자별 암호문은 기존 DB에 저장합니다. 로컬은 SQLite, 운영은 PostgreSQL이며 AES-GCM의 소유자·연결 ID 바인딩을 적용합니다. 브라우저 저장소·사이트 세션 JWT·API 응답에는 키/제공자 토큰을 넣지 않습니다. 운영자 암호화 키와 OAuth 앱 비밀은 서버 환경의 비밀 저장소에 별도로 둡니다. 현재는 API 단일 worker에서 연결 생성·갱신·해제를 직렬화하고 버전 비교로 토큰 교체를 보호합니다.
+연결 메타데이터와 버전 고정 Key Vault 참조는 DB에 저장합니다. 로컬은 SQLite, 운영은 PostgreSQL이며 제목·메시지·첨부·연결 이름은 AES-GCM으로 암호화합니다. 브라우저 저장소·사이트 세션 JWT·API 응답에는 키/제공자 토큰을 넣지 않습니다. 운영 비밀과 사용자 연결 비밀은 Key Vault, 일반 설정은 App Configuration에서 읽습니다. 현재는 API 단일 worker에서 연결 생성·갱신·해제를 직렬화하고 버전 비교로 토큰 교체를 보호합니다.
 
 잔여량은 공식 조회가 제공되는 경우에만 조회 시각과 함께 표시합니다. 다른 앱이 같은 계정의 한도를 소비할 수 있으며, 앱의 사용 기록은 제공자 전체 잔여량이 아닙니다. 같은 할당량 그룹의 429 이후 다른 키로 자동 우회하지 않습니다. 기본 그룹은 제공자별 `account`이며 프로젝트/계정 식별을 자동 확인한다고 주장하지 않습니다.
 
@@ -173,7 +176,7 @@ Claude.ai 소비자 로그인·구독 토큰을 제3자 앱에서 수집·중개
 
 1. GitHub **Settings → Developer settings → OAuth Apps → New OAuth App**을 엽니다.
 2. Homepage URL에 실제 웹 주소를 입력하고 callback은 `http://localhost:3000/api/connections/copilot/callback`으로 지정합니다. HTTPS 호스팅에서는 실제 HTTPS 주소를 사용합니다. 사이트 로그인용 `/api/auth/callback/github`와 다릅니다.
-3. Client ID·Client secret을 루트 API 환경의 `WAGL_COPILOT_CLIENT_ID`, `WAGL_COPILOT_CLIENT_SECRET`에 직접 설정합니다. 비밀은 웹 브라우저용 환경 변수나 Git에 넣지 않습니다.
+3. Client ID·Client secret을 Key Vault에 등록하고 App Configuration `local-api`의 `WAGL_COPILOT_CLIENT_ID`, `WAGL_COPILOT_CLIENT_SECRET`을 네이티브 Key Vault 참조로 설정합니다. 비밀은 로컬 환경 파일·웹 브라우저용 환경 변수·Git에 넣지 않습니다.
 4. API와 웹 양쪽의 `WAGL_PUBLIC_URL`을 동일한 외부 origin으로 설정합니다. 로컬 기본값은 `http://localhost:3000`이며 `localhost`와 `127.0.0.1`을 섞지 않습니다. 웹의 사이트 로그인 설정도 먼저 완료해야 합니다.
 5. 서버를 재시작한 뒤 **연결 추가 → GitHub Copilot**에서 승인 흐름을 실제 계정으로 검증합니다. 앱 비밀이나 사용자 토큰을 로그·스크린샷·채팅으로 공유하지 않습니다.
 
@@ -192,7 +195,7 @@ npm run build
 npm audit --omit=dev
 ```
 
-검사 범위: 사용자 격리·서명 토큰·암호화 바인딩, 무료 가격·동의·429/안전 거절, 부분 응답·취소·잠금 해제, 실제 LiteLLM SDK의 모의 HTTP 계약, SQLite 마이그레이션 비교·롤백, 한글 분할 SSE, 데스크톱·모바일 키 마스킹·전송·중지·삭제·초안 복구. E2E는 테스트 전용 서명 세션과 모의 API를 사용하며 실키 추론이나 실제 GitHub OAuth 성공을 증명하지 않습니다. 스크린샷은 `apps/web/test-results/`에 생성됩니다.
+검사 범위: 사용자 격리·서명 토큰·암호화 바인딩, Key Vault 참조·실패 차단·이전·백업 보호, 무료 가격·동의·429/안전 거절, 부분 응답·취소·잠금 해제, 실제 LiteLLM SDK의 모의 HTTP 계약, SQLite 마이그레이션 비교·암호화 역변환 차단, 한글 분할 SSE, 데스크톱·모바일 키 마스킹·전송·중지·삭제·초안 복구. E2E는 테스트 전용 서명 세션과 모의 API를 사용하며 실키 추론이나 실제 GitHub OAuth 성공을 증명하지 않습니다. 스크린샷은 `apps/web/test-results/`에 생성됩니다.
 
 연결 검증에는 OAuth 소유자·브라우저 바인딩·만료·중복 콜백·재연결·토큰 갱신·해제, 무료 전용 차단, 기존 암호문 보존과 제공자별 단계별 안내를 포함합니다. Compose 문법·환경 치환 검증과 실제 컨테이너 실행 검증은 구별해야 합니다.
 
@@ -200,14 +203,7 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 
 ## PostgreSQL·Redis 구성
 
-위의 로컬 SQLite 실행에는 Docker나 WSL이 필요하지 않습니다. PostgreSQL·Redis가 필요하면 Linux/WSL의 Docker Engine과 Compose를 사용할 수 있으며 Docker Desktop 설치는 필수가 아닙니다. 현재 환경의 Compose 컨테이너 실행은 검증하지 못했습니다.
-
-```powershell
-docker compose config --quiet
-docker compose up --build
-```
-
-Compose는 DB·Redis·API 포트를 호스트에 노출하지 않고 웹만 `127.0.0.1:3000`에 바인딩합니다. API는 시작 전에 Alembic 마이그레이션을 적용합니다. 로컬 서버를 먼저 중지해 포트 충돌을 피하세요.
+위의 로컬 SQLite 실행에는 Docker나 WSL이 필요하지 않습니다. 기존 `compose.yaml`은 중앙 설정 도입 전의 참고 구성으로, 현재 부트스트랩 파일만으로 실행할 수 없습니다. 일반 로컬 컨테이너에는 Azure Managed Identity가 없으므로 Azure 인증과 별도 DB/Redis 레이블을 설계하기 전에는 사용하지 마세요. 비밀을 환경 파일에 다시 복사하는 우회는 권장하지 않습니다. Azure 운영 컨테이너는 Managed Identity와 별도의 production 설정을 사용합니다.
 
 연결 기능 추가 전의 기존 SQLite DB는 반드시 백업합니다. Alembic 버전이 있으면 루트에서 `.venv\Scripts\python -m alembic -c services\api\alembic.ini upgrade head`를 실행합니다. 버전 없이 `create_all`로 만들어진 **기존 0001 스키마와 일치하는지 확인한 DB만** `stamp 0001` 후 `upgrade head`를 실행합니다. `stamp head`로 0002의 실제 변경을 건너뛰거나 테이블을 삭제하지 마세요. 새 빈 DB에는 바로 `upgrade head`를 적용할 수 있습니다. `0002`는 기존 API 키 암호문과 동의를 보존합니다. OAuth 연결이 생긴 이후에는 구버전으로의 역마이그레이션을 거부합니다.
 

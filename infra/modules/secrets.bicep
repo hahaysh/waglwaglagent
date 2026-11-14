@@ -12,6 +12,9 @@ param waglEncryptionKey string
 param authSecret string
 @secure()
 param authGithubSecret string
+param copilotClientId string = ''
+@secure()
+param copilotClientSecret string = ''
 
 resource vault 'Microsoft.KeyVault/vaults@2023-07-01' existing = { name: kvName }
 resource redis 'Microsoft.Cache/redisEnterprise@2025-07-01' existing = { name: redisName }
@@ -44,6 +47,16 @@ resource githubSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empt
   parent: vault
   name: 'waglwaglagent-github-secret'
   properties: { value: authGithubSecret }
+}
+resource copilotId 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(copilotClientId) && !empty(copilotClientSecret)) {
+  parent: vault
+  name: 'waglwaglagent-copilot-id'
+  properties: { value: copilotClientId }
+}
+resource copilotSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(copilotClientId) && !empty(copilotClientSecret)) {
+  parent: vault
+  name: 'waglwaglagent-copilot-secret'
+  properties: { value: copilotClientSecret }
 }
 resource postgresPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: vault

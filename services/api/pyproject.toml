@@ -21,6 +21,9 @@ dependencies = [
   "github-copilot-sdk==1.0.34",
   "filelock>=4.2.1,<5",
   "pillow>=12,<14",
+  "azure-identity>=1.25,<2",
+  "azure-keyvault-secrets>=4.10,<5",
+  "azure-appconfiguration>=1.7,<2",
 ]
 
 [project.optional-dependencies]

@@ -34,9 +34,11 @@ from app.security import (
     authenticated_owner,
     decrypt_key,
     decrypt_oauth,
+    delete_key,
     encrypt_key,
     key_fingerprint,
 )
+from app.vault import SecretMissingError, SecretStoreError
 
 Owner = Annotated[str, Depends(authenticated_owner)]
 Database = Annotated[Session, Depends(session_for)]
@@ -77,6 +79,11 @@ async def invalid_input(_request, _error):
 async def provider_error(_request, error: ProviderError):
     status = 422 if error.failure in {Failure.INVALID, Failure.AUTH} else 503
     return JSONResponse({"detail": error.code}, status_code=status)
+
+
+@app.exception_handler(SecretStoreError)
+async def secret_store_error(_request, _error):
+    return JSONResponse({"detail": "secret_store_unavailable"}, status_code=503)
 
 
 @app.middleware("http")
@@ -216,7 +223,7 @@ async def save_api_key(
         owner_id=owner,
         provider=body.provider,
         label=body.label,
-        encrypted_key=encrypt_key(raw_key, owner, credential_id),
+        encrypted_key=await asyncio.to_thread(encrypt_key, raw_key, owner, credential_id),
         fingerprint=fingerprint,
         model=body.model,
         upstreams=list(dict.fromkeys(body.upstreams)),
@@ -279,7 +286,9 @@ async def verify_connection(
                 request.app.state.providers.client, credential, database,
             )
             if credential.auth_status == "authenticated":
-                tokens = decrypt_oauth(credential.encrypted_key, owner, credential.id)
+                tokens = await asyncio.to_thread(
+                    decrypt_oauth, credential.encrypted_key, owner, credential.id,
+                )
                 snapshot = await request.app.state.copilot.verify(tokens["access_token"])
                 credential.model = "auto"
                 if snapshot["status"] == "invalid":
@@ -287,7 +296,9 @@ async def verify_connection(
         else:
             snapshot = await request.app.state.providers.validate(
                 credential.provider,
-                decrypt_key(credential.encrypted_key, owner, credential.id),
+                await asyncio.to_thread(
+                    decrypt_key, credential.encrypted_key, owner, credential.id,
+                ),
             )
             credential.auth_status = "authenticated"
         credential.status = snapshot["status"]
@@ -318,18 +329,28 @@ async def disconnect(
     credential_id: str, request: Request, database: Session, owner: str,
 ):
     credential = own_credential(database, owner, credential_id)
-    tokens = (
-        decrypt_oauth(credential.encrypted_key, owner, credential.id)
-        if credential.auth_type == "oauth" else None
-    )
+    tokens, missing_oauth = None, False
+    if credential.auth_type == "oauth":
+        try:
+            tokens = await asyncio.to_thread(
+                decrypt_oauth, credential.encrypted_key, owner, credential.id,
+            )
+        except SecretMissingError:
+            missing_oauth = True
     if owner in request.app.state.active:
         request.app.state.active[owner].cancel()
+    await asyncio.to_thread(
+        delete_key, credential.encrypted_key, owner,
+        f"{credential.id}:oauth_v1" if credential.auth_type == "oauth" else credential.id,
+    )
     database.execute(update(OAuthAttempt).where(
         OAuthAttempt.owner_id == owner, OAuthAttempt.provider == credential.provider,
     ).values(status="cancelled", encrypted_verifier=None))
     database.delete(credential)
     database.commit()
-    if tokens and not await revoke_copilot(request.app.state.providers.client, tokens):
+    if missing_oauth or (
+        tokens and not await revoke_copilot(request.app.state.providers.client, tokens)
+    ):
         return JSONResponse(
             {"detail": "local_disconnect_only"}, status_code=200,
         )
@@ -572,11 +593,13 @@ async def execute_stream(
                         if credential.auth_type != "oauth":
                             yield sse("error", {"code": "consent_changed"})
                             break
-                        raw_key = decrypt_oauth(
-                            credential.encrypted_key, owner, credential.id,
-                        )["access_token"]
+                        raw_key = (await asyncio.to_thread(
+                            decrypt_oauth, credential.encrypted_key, owner, credential.id,
+                        ))["access_token"]
                     else:
-                        raw_key = decrypt_key(credential.encrypted_key, owner, credential.id)
+                        raw_key = await asyncio.to_thread(
+                            decrypt_key, credential.encrypted_key, owner, credential.id,
+                        )
                     consent = credential.consent_version
                     fingerprint = credential.fingerprint
                 endpoint_scope = f"endpoint:{candidate.credential_id}:{candidate.upstreams}"
@@ -710,6 +733,8 @@ async def execute_stream(
         yield sse("error", {"code": "request_timeout"})
     except HTTPException:
         yield sse("error", {"code": "application_limit"})
+    except SecretStoreError:
+        yield sse("error", {"code": "secret_store_unavailable"})
     except asyncio.CancelledError:
         final_status = "cancelled"
         raise

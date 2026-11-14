@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -15,8 +16,10 @@ from sqlalchemy import (
     event,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.types import TypeDecorator
 
 from app.config import get_settings
+from app.encryption import seal, unseal
 
 
 def identifier() -> str:
@@ -31,6 +34,34 @@ class Base(DeclarativeBase):
     pass
 
 
+class EncryptedText(TypeDecorator):
+    impl = Text
+    cache_ok = True
+
+    def __init__(self, context: str):
+        super().__init__()
+        self.context = context
+
+    def process_bind_param(self, value, dialect):
+        return None if value is None else seal(value, self.context)
+
+    def process_result_value(self, value, dialect):
+        return None if value is None else unseal(value, self.context)
+
+
+class EncryptedAttachments(TypeDecorator):
+    impl = JSON
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return {"encrypted": seal(json.dumps(value), "messages.attachments")}
+
+    def process_result_value(self, value, dialect):
+        if not isinstance(value, dict) or set(value) != {"encrypted"}:
+            raise ValueError("Unencrypted attachments; run database migrations before starting")
+        return json.loads(unseal(value["encrypted"], "messages.attachments"))
+
+
 class Credential(Base):
     __tablename__ = "credentials"
     __table_args__ = (
@@ -39,7 +70,7 @@ class Credential(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
     owner_id: Mapped[str] = mapped_column(String(100), index=True)
     provider: Mapped[str] = mapped_column(String(30))
-    label: Mapped[str] = mapped_column(String(80))
+    label: Mapped[str] = mapped_column(EncryptedText("credentials.label"))
     encrypted_key: Mapped[str] = mapped_column("encrypted_secret", Text)
     secret_format: Mapped[str] = mapped_column(String(30), default="api_key_v1")
     encryption_key_version: Mapped[int] = mapped_column(Integer, default=1)
@@ -81,7 +112,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
     owner_id: Mapped[str] = mapped_column(String(100), index=True)
-    title: Mapped[str] = mapped_column(String(120))
+    title: Mapped[str] = mapped_column(EncryptedText("conversations.title"))
     created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
 
 
@@ -92,8 +123,8 @@ class Message(Base):
         ForeignKey("conversations.id", ondelete="CASCADE"), index=True
     )
     role: Mapped[str] = mapped_column(String(20))
-    content: Mapped[str] = mapped_column(Text)
-    attachments: Mapped[list] = mapped_column(JSON, default=list)
+    content: Mapped[str] = mapped_column(EncryptedText("messages.content"))
+    attachments: Mapped[list] = mapped_column(EncryptedAttachments(), default=list)
     provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="complete")

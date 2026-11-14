@@ -14,6 +14,11 @@ export default defineConfig({
     command: "npm run dev -- --hostname 127.0.0.1 --port 3110",
     url: "http://127.0.0.1:3110", reuseExistingServer: false,
     env: {
+      WAGL_ENVIRONMENT: "local",
+      WAGL_APP_CONFIG_ENDPOINT: "",
+      WAGL_APP_CONFIG_LABEL: "",
+      WAGL_KEY_VAULT_URL: "",
+      AUTH_URL: "http://127.0.0.1:3110",
       AUTH_SECRET: "test-session-secret-only-not-for-production-0123456789",
       AUTH_GITHUB_ID: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-oauth-client",
       AUTH_GITHUB_SECRET: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-oauth-secret",

@@ -29,6 +29,7 @@ const errors: Record<string, string> = {
   "Policy service unavailable": "API 서버에 연결할 수 없습니다.",
   "Provider preflight timed out": "제공자 사전 확인 시간이 초과됐습니다.",
   "Service not configured": "서버 설정이 필요합니다.",
+  secret_store_unavailable: "Key Vault에 접근할 수 없어 요청을 중지했습니다. 운영자에게 로그인·권한·연결 상태 확인을 요청해주세요.",
   "Invalid input": "입력값을 확인해주세요.",
   attachment_invalid: "첨부를 읽을 수 없습니다. 이미지는 PNG·JPEG·WebP(16MP 이하), 텍스트는 UTF-8(32KB 이하)인지 확인해주세요.",
   attachment_too_large: "첨부는 파일당 2MB, 한 메시지 합계 4MB 이하여야 합니다.",

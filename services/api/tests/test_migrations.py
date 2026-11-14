@@ -1,6 +1,7 @@
 import base64
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
@@ -53,8 +54,9 @@ def test_initial_migration_matches_models_and_rolls_back(tmp_path, monkeypatch):
             message = database.get(Message, "old-message")
             assert message.attachments == []
             assert message.content == "Keep my message"
-        command.downgrade(config, "base")
-        assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+        with pytest.raises(RuntimeError, match="cannot be downgraded"):
+            command.downgrade(config, "base")
+        assert "messages" in inspect(engine).get_table_names()
     finally:
         engine.dispose()
         get_settings.cache_clear()
