@@ -24,6 +24,17 @@ def database_url(host: str, username: str, password: str, database: str) -> str:
     )
 
 
+def sql_database_url(host: str, database: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[a-zA-Z0-9-]+\.database\.windows\.net", host):
+        raise ValueError("Unexpected Azure SQL hostname")
+    return (
+        f"mssql+mssqlpython://@{host}:1433/{quote(database, safe='')}?"
+        "authentication=ActiveDirectoryMSI&encrypt=yes&trustservercertificate=no"
+    )
+
+
 def redis_url(host: str, password: str) -> str:
     if not host.endswith(".redis.azure.net") or any(
         character in host for character in "/:@?#"
@@ -47,9 +58,13 @@ def configure(args):
         or api["location"].replace(" ", "").lower() != "koreacentral"
     ):
         raise RuntimeError("API must use the existing web plan and Korea Central identity")
-    postgres = az(
-        args, "postgres", "flexible-server", "show", "--resource-group", args.resource_group,
-        "--name", "waglwaglagent-postgres",
+    server = az(args, "sql", "server", "show", "--resource-group", args.resource_group,
+                "--name", "waglwaglagent-sql")
+    database = az(args, "sql", "db", "show", "--resource-group", args.resource_group,
+                  "--server", server["name"], "--name", "waglwaglagent-db")
+    entra_only = az(
+        args, "sql", "server", "ad-only-auth", "get", "--resource-group", args.resource_group,
+        "--name", server["name"],
     )
     redis = az(
         args, "resource", "show", "--resource-group", args.resource_group,
@@ -57,8 +72,9 @@ def configure(args):
         "--api-version", "2025-07-01",
     )
     if (
-        postgres["sku"]["name"] != "Standard_B1ms"
-        or postgres["storage"]["storageSizeGb"] != 32
+        database["sku"]["name"] != "Basic"
+        or database["maxSizeBytes"] != 2147483648
+        or not entra_only["azureAdOnlyAuthentication"]
         or redis["sku"]["name"] != "Balanced_B0"
         or redis["properties"]["highAvailability"] != "Disabled"
     ):
@@ -82,10 +98,8 @@ def configure(args):
         "WAGL_COPILOT_CLIENT_SECRET": "waglwaglagent-production-copilot-secret",
     }
     with SecretClient(vault_url, credential, logging_enable=False) as vault:
-        password = vault.get_secret("waglwaglagent-production-postgres-password").value
-        store_secret(vault, references["WAGL_DATABASE_URL"], database_url(
-            postgres["fullyQualifiedDomainName"], postgres["administratorLogin"],
-            password, "waglwaglagent-db",
+        store_secret(vault, references["WAGL_DATABASE_URL"], sql_database_url(
+            server["fullyQualifiedDomainName"], database["name"],
         ))
         store_secret(vault, references["WAGL_REDIS_URL"], redis_url(
             redis["properties"]["hostName"], keys["primaryKey"],

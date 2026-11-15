@@ -21,10 +21,20 @@ def run_migrations_offline():
 
 
 def run_migrations_online():
+    supplied_connection = config.attributes.get("connection")
+    if supplied_connection is not None:
+        context.configure(connection=supplied_connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+    options = (
+        {"deprecate_large_types": True}
+        if get_settings().database_url.startswith("mssql+")
+        else {}
+    )
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
+        prefix="sqlalchemy.", poolclass=pool.NullPool, **options,
     )
     try:
         with connectable.connect() as connection:

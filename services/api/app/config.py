@@ -87,8 +87,30 @@ class Settings(BaseSettings):
         if self.environment not in {"local", "production"}:
             raise ValueError("Environment must be local or production")
         if self.environment == "production":
-            if not self.database_url.startswith("postgresql+psycopg://") or not self.redis_url:
-                raise ValueError("Production requires PostgreSQL and Redis")
+            if not self.redis_url:
+                raise ValueError("Production requires Redis")
+            if self.database_url.startswith("mssql+mssqlpython://"):
+                from sqlalchemy.engine import make_url
+
+                database = make_url(self.database_url)
+                if (
+                    not database.host
+                    or not database.host.endswith(".database.windows.net")
+                    or database.username not in {None, ""}
+                    or database.password is not None
+                    or not database.database
+                    or database.port not in {None, 1433}
+                    or dict(database.query) != {
+                        "authentication": "ActiveDirectoryMSI",
+                        "encrypt": "yes",
+                        "trustservercertificate": "no",
+                    }
+                ):
+                    raise ValueError(
+                        "Azure SQL requires certificate-verified Managed Identity auth"
+                    )
+            elif not self.database_url.startswith("postgresql+psycopg://"):
+                raise ValueError("Production requires Azure SQL or PostgreSQL")
             if self.gemini_reviews:
                 raise ValueError(
                     "Gemini billing tier cannot be continuously verified in production"

@@ -73,7 +73,7 @@ DB 백업은 AAD `backup:<원래 파일명>`, 환경 백업은 AAD `backup:envir
 ## Azure 운영
 
 일반 설정은 `production-api`, `production-web`에 실제 운영 URL로 별도 설정하세요.
-로컬 SQLite URL을 운영 레이블로 복사하지 마세요. 운영 API에는 PostgreSQL과 Redis가 필요합니다.
+로컬 SQLite URL을 운영 레이블로 복사하지 마세요. 운영 API에는 Azure SQL과 Redis가 필요합니다.
 App Service에는 환경·App Configuration endpoint/레이블 등 부트스트랩과
 컨테이너 실행에 필요한 플랫폼 설정만 둡니다.
 기존 전체 호스팅 IaC는 별도 파일럿 리소스 그룹을 생성하므로 **현재 로컬 전환을 위해
@@ -124,7 +124,7 @@ GitHub 앱 ID·비밀은 추측하거나 로컬 OAuth 앱에서 복사하지 않
 
 ### 최초 자동 배포 활성화 전
 
-1. 별도로 승인한 운영 FastAPI/PostgreSQL/Redis를 준비합니다. API의 운영 설정은
+1. 별도로 승인한 운영 FastAPI/Azure SQL/Redis를 준비합니다. API의 운영 설정은
    `production-api`에 두고, 웹과 같은 운영 `WAGL_INTERNAL_SECRET`을 참조합니다.
    실제 HTTPS API origin을 `production-web`의 `WAGL_API_URL`에 설정합니다.
    웹 자기 자신이나 localhost를 입력하지 않습니다.
@@ -142,10 +142,11 @@ GitHub 앱 ID·비밀은 추측하거나 로컬 OAuth 앱에서 복사하지 않
 
 ### 공유 플랜 백엔드와 운영 참조
 
-`infra/backend.bicep`은 기존 B1 플랜을 재사용합니다. API는 Python 3.12·한 worker,
-PostgreSQL은 B1ms/32GB·백업 7일, Redis는 B0·TLS·HA 비활성 후보입니다.
-현재 Korea Central PostgreSQL 생성은 `SkuNotAvailable`로 차단됐고
-API·Redis만 생성했습니다. SKU 목록·ARM validate 성공은 실제 할당 성공을 보장하지 않습니다.
+기존 API는 Python 3.12·한 worker로 웹과 B1 플랜을 공유하며 Redis는 B0·TLS·HA 비활성입니다.
+PostgreSQL 초기 템플릿 `infra/backend.bicep`은 실제 할당 실패 후 운영에 재실행하지 않습니다.
+대신 `infra/sql.bicep`으로 Korea Central SQL Basic(5 DTU/2GB·Local 백업 7일)을 생성합니다.
+Entra-only 인증과 API의 system Managed Identity를 사용하며 SQL 암호를 생성하지 않습니다.
+API outbound IP만 허용하고 임시 운영자 규칙은 설정·검증 후 제거합니다.
 유료 SKU 또는 리전은 자동 변경하지 않습니다. DB가 없으면 배포 준비 검사를 통과시키지 않습니다.
 
 운영 Copilot OAuth 앱은 사이트 로그인과 별도로 등록했으며 callback은
@@ -161,15 +162,20 @@ API·Redis만 생성했습니다. SKU 목록·ARM validate 성공은 실제 할�
 | `WAGL_COPILOT_CLIENT_ID` | `waglwaglagent-production-copilot-id` |
 | `WAGL_COPILOT_CLIENT_SECRET` | `waglwaglagent-production-copilot-secret` |
 
-DB를 실제 생성한 후 기존 Python 환경에서 `scripts/configure_backend.py`를
+DB 생성 후 `scripts/configure_sql_database.py`에 실제 SQL 호스트·API principal ID·tenant를
+전달해 contained identity의 SID와 reader/writer/DDL 역할을 검증합니다.
+그 다음 준비된 Python 환경에서 `scripts/configure_backend.py`를
 명시적 `--subscription`, `--tenant`와 함께 실행합니다. 이 도구는 실제 호스트·공유 플랜·SKU를
 검사하고 DB/Redis URL을 Key Vault에 저장·재조회합니다. App Configuration에는 네이티브
 참조와 일반 URL만 넣고 GitHub Environment에 API 대상 변수를 설정합니다.
-PostgreSQL은 `sslmode=verify-full&sslrootcert=system`, Redis는 `rediss`와 인증서 검증을
-사용합니다. 비밀은 명령 인자·GitHub 변수·ZIP에 넣지 않습니다.
+SQL URL은 `mssql+mssqlpython`과 `authentication=ActiveDirectoryMSI&encrypt=yes&trustservercertificate=no`,
+Redis는 `rediss`와 인증서 검증을 사용합니다. 암호 없는 SQL URL도 기존 네이티브
+Key Vault 참조 계약을 유지합니다. 비밀은 명령 인자·GitHub 변수·ZIP에 넣지 않습니다.
 
 운영 암호화 키는 새 DB용으로 생성하며 로컬 데이터의 기존 키를 바꾸지 않습니다.
-첫 DB 연결은 migration을 위한 서버 관리자 계정이므로 공개 운영 전 runtime 계정을 분리하세요.
+API는 서버 관리자나 `db_owner`가 아닌 contained Managed Identity입니다.
+현재 시작 시 migration 때문에 `db_ddladmin`이 필요합니다. migration을 배포 전용 ID로 분리한
+후에는 이 역할을 제거할 수 있습니다. 원래 운영 암호화 키를 재생성하지 않습니다.
 백업 복원에는 DB뿐 아니라 원래 암호화 키도 필요합니다. 보존 7일 설정은 복원 시험 완료를
 뜻하지 않습니다. API·웹의 CPU/RAM은 공유하므로 우선 scale-up을 검토하고,
 API의 분산 취소·재시작 복구를 구현하기 전에는 scale-out하지 않습니다.

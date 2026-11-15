@@ -44,9 +44,13 @@ def transform(encrypt: bool):
 
 def upgrade():
     with op.batch_alter_table("credentials") as batch:
-        batch.alter_column("label", existing_type=sa.String(80), type_=sa.Text())
+        batch.alter_column(
+            "label", existing_type=sa.String(80), type_=sa.Text(), existing_nullable=False
+        )
     with op.batch_alter_table("conversations") as batch:
-        batch.alter_column("title", existing_type=sa.String(120), type_=sa.Text())
+        batch.alter_column(
+            "title", existing_type=sa.String(120), type_=sa.Text(), existing_nullable=False
+        )
     transform(True)
 
 

@@ -53,6 +53,8 @@ jobs:
           runtime="$RUNNER_TEMP/copilot-runtime"
           python -m pip install --require-hashes --only-binary=:all: \
             --target "$packages" -r services/api/requirements.lock
+          PYTHONPATH="$packages" python -c \
+            "import mssql_python; from sqlalchemy.dialects import registry; registry.load('mssql.mssqlpython')"
           PYTHONPATH="$packages" COPILOT_CLI_EXTRACT_DIR="$runtime" \
             python -c "from copilot._cli_download import download_cli; download_cli()"
           python scripts/package_api.py --dependencies "$packages" --runtime "$runtime" \

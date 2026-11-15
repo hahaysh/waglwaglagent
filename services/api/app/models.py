@@ -8,12 +8,13 @@ from sqlalchemy import (
     JSON,
     Boolean,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    UniqueConstraint,
     create_engine,
     event,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -65,7 +66,10 @@ class EncryptedAttachments(TypeDecorator):
 class Credential(Base):
     __tablename__ = "credentials"
     __table_args__ = (
-        UniqueConstraint("owner_id", "provider", "provider_subject", name="uq_provider_account"),
+        Index(
+            "uq_provider_account", "owner_id", "provider", "provider_subject",
+            unique=True, mssql_where=text("provider_subject IS NOT NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
     owner_id: Mapped[str] = mapped_column(String(100), index=True)
@@ -156,8 +160,15 @@ class Attempt(Base):
 
 
 def make_engine(url: str):
+    options = {}
+    if url.startswith("mssql+"):
+        options = {
+            "pool_pre_ping": True, "pool_size": 3, "max_overflow": 2,
+            "deprecate_large_types": True,
+        }
     engine = create_engine(
-        url, connect_args={"check_same_thread": False} if url.startswith("sqlite:") else {}
+        url, connect_args={"check_same_thread": False} if url.startswith("sqlite:") else {},
+        **options,
     )
     if url.startswith("sqlite:"):
 

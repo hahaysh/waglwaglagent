@@ -7,7 +7,7 @@ from cryptography.exceptions import InvalidTag
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.security import authenticated_owner, decrypt_key, encrypt_key
 
 
@@ -56,3 +56,26 @@ def test_production_requires_shared_infrastructure(monkeypatch):
     get_settings.cache_clear()
     with pytest.raises(ValueError, match="Production requires Azure Key Vault"):
         get_settings()
+
+
+def test_azure_sql_requires_managed_identity_and_verified_tls():
+    url = (
+        "mssql+mssqlpython://@example.database.windows.net:1433/db?"
+        "authentication=ActiveDirectoryMSI&encrypt=yes&trustservercertificate=no"
+    )
+    settings = Settings.model_construct(
+        environment="production", database_url=url, redis_url="rediss://example",
+        internal_secret="s" * 48, encryption_key=base64.b64encode(bytes(range(32))).decode(),
+        public_url="https://example.test",
+    )
+    assert settings.validate_security() is settings
+    for invalid in (
+        url.replace("ActiveDirectoryMSI", "ActiveDirectoryPassword"),
+        url.replace("encrypt=yes", "encrypt=no"),
+        url.replace("trustservercertificate=no", "trustservercertificate=yes"),
+        url.replace("example.database.windows.net", "untrusted.example"),
+        url.replace("://@", "://user:password@"),
+    ):
+        settings.database_url = invalid
+        with pytest.raises(ValueError, match="certificate-verified"):
+            settings.validate_security()

@@ -165,7 +165,7 @@ Claude.ai 소비자 로그인·구독 토큰을 제3자 앱에서 수집·중개
 - **연결 삭제**: 이 사이트의 암호화 비밀과 연결을 삭제하며 대화 이력 삭제와는 별개입니다. Copilot은 GitHub 토큰 철회도 시도합니다. 철회 실패 안내가 나오면 GitHub **Settings → Applications → Authorized OAuth Apps**에서 직접 철회하세요.
 - API 키는 다른 앱에서도 쓰일 수 있으므로 이 사이트에서 삭제해도 발급처의 키 자체를 폐기하지 않습니다. 완전 폐기가 필요하면 발급처 API Keys에서 직접 삭제하세요.
 
-연결 메타데이터와 버전 고정 Key Vault 참조는 DB에 저장합니다. 로컬은 SQLite, 운영은 PostgreSQL이며 제목·메시지·첨부·연결 이름은 AES-GCM으로 암호화합니다. 브라우저 저장소·사이트 세션 JWT·API 응답에는 키/제공자 토큰을 넣지 않습니다. 운영 비밀과 사용자 연결 비밀은 Key Vault, 일반 설정은 App Configuration에서 읽습니다. 현재는 API 단일 worker에서 연결 생성·갱신·해제를 직렬화하고 버전 비교로 토큰 교체를 보호합니다.
+연결 메타데이터와 버전 고정 Key Vault 참조는 DB에 저장합니다. 로컬은 SQLite, 운영은 Azure SQL Database Basic이며 제목·메시지·첨부·연결 이름은 AES-GCM으로 암호화합니다. 브라우저 저장소·사이트 세션 JWT·API 응답에는 키/제공자 토큰을 넣지 않습니다. 운영 비밀과 사용자 연결 비밀은 Key Vault, 일반 설정은 App Configuration에서 읽습니다. 현재는 API 단일 worker에서 연결 생성·갱신·해제를 직렬화하고 버전 비교로 토큰 교체를 보호합니다.
 
 잔여량은 공식 조회가 제공되는 경우에만 조회 시각과 함께 표시합니다. 다른 앱이 같은 계정의 한도를 소비할 수 있으며, 앱의 사용 기록은 제공자 전체 잔여량이 아닙니다. 같은 할당량 그룹의 429 이후 다른 키로 자동 우회하지 않습니다. 기본 그룹은 제공자별 `account`이며 프로젝트/계정 식별을 자동 확인한다고 주장하지 않습니다.
 
@@ -202,11 +202,13 @@ npm audit --omit=dev
 
 Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정합니다. LiteLLM은 `filelock` 보안 수정과 호환되는 1.100.4로 고정했으며 설치 환경의 `pip-audit`은 알려진 취약점 0건입니다. 직접 작성한 API 패키지는 PyPI에 없어 감사 대상에서 제외됩니다. 웹은 `package-lock.json`과 `npm ci`를 사용합니다. Next.js 15.5.28의 하위 PostCSS는 보안 수정 버전 8.5.32로 고정했습니다. 런타임 npm 보안 검사는 0건이며, 개발용 ESLint/minimatch 계열 중간 심각도 경고 14건은 공개 출시 전 해결해야 합니다.
 
-## PostgreSQL·Redis 구성
+## DB·Redis 구성
 
 위의 로컬 SQLite 실행에는 Docker나 WSL이 필요하지 않습니다. 기존 `compose.yaml`은 중앙 설정 도입 전의 참고 구성으로, 현재 부트스트랩 파일만으로 실행할 수 없습니다. 일반 로컬 컨테이너에는 Azure Managed Identity가 없으므로 Azure 인증과 별도 DB/Redis 레이블을 설계하기 전에는 사용하지 마세요. 비밀을 환경 파일에 다시 복사하는 우회는 권장하지 않습니다. Azure 운영 컨테이너는 Managed Identity와 별도의 production 설정을 사용합니다.
 
 연결 기능 추가 전의 기존 SQLite DB는 반드시 백업합니다. Alembic 버전이 있으면 루트에서 `.venv\Scripts\python -m alembic -c services\api\alembic.ini upgrade head`를 실행합니다. 버전 없이 `create_all`로 만들어진 **기존 0001 스키마와 일치하는지 확인한 DB만** `stamp 0001` 후 `upgrade head`를 실행합니다. `stamp head`로 0002의 실제 변경을 건너뛰거나 테이블을 삭제하지 마세요. 새 빈 DB에는 바로 `upgrade head`를 적용할 수 있습니다. `0002`는 기존 API 키 암호문과 동의를 보존합니다. OAuth 연결이 생긴 이후에는 구버전으로의 역마이그레이션을 거부합니다.
+
+운영 SQL은 공식 `mssql-python`과 SQLAlchemy 2.1의 `mssql+mssqlpython` dialect를 사용합니다. `0005`의 filtered unique index는 SQL Server에서도 계정 식별자가 없는 여러 API 키를 허용하고, 동일 OAuth 계정 중복은 막습니다. SQLite·기존 PostgreSQL 연결은 유지하며 로컬 DB와 키를 운영 DB로 복사하지 않습니다.
 
 ## GitHub Actions 배포
 
@@ -216,7 +218,7 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 - OIDC subject는 GitHub OIDC API의 `sub_claim_prefix`에 `:environment:azure-production`을 붙입니다. 현재 저장소는 불변 ID를 포함한 `repo:hahaysh@24690076/waglwaglagent@1444424609:environment:azure-production`을 사용합니다. issuer는 `https://token.actions.githubusercontent.com`, audience는 `api://AzureADTokenExchange`입니다. 전용 배포 ID는 대상 Web App의 Website Contributor와 App Configuration Data Reader만 가지며 Key Vault secret을 직접 조회하지 않습니다.
 - Web App는 Node 24 LTS를 사용하고, Actions에서 ZIP 업로드가 성공한 뒤에만 `node server.js` 시작 명령을 적용합니다. 미배포 앱에 이 명령을 먼저 지정하면 파일이 없어 503이 발생합니다. 런타임 Managed Identity가 `production-web` 레이블과 운영용 Key Vault secret을 읽습니다. 운영 비밀은 빌드·ZIP·Actions 변수에 포함하지 않습니다.
 - API ZIP에는 해시 고정 Linux 의존성과 SDK의 고정 Copilot 런타임을 포함합니다. 업로드 성공 후에만 `python start_api.py`를 활성화하며, 시작 시 Alembic 실패는 서버 실행을 차단합니다. API는 한 worker로 실행합니다.
-- **첫 배포 전제:** 실제 PostgreSQL/Redis와 운영 GitHub 로그인·별도 Copilot OAuth가 필요합니다. API 업로드 전 네이티브 Key Vault 참조와 Copilot callback 확인을 검사합니다. API `/ready`는 실제 DB 쿼리와 Redis ping을 확인하고 `/health`는 프로세스 생존만 확인합니다. API 준비 검사가 통과해야 웹을 업로드합니다. 준비되지 않으면 우회하지 않습니다.
+- **첫 배포 전제:** 실제 Azure SQL/Redis와 운영 GitHub 로그인·별도 Copilot OAuth가 필요합니다. API 업로드 전 네이티브 Key Vault 참조와 Copilot callback 확인을 검사합니다. API `/ready`는 실제 DB 쿼리와 Redis ping을 확인하고 `/health`는 프로세스 생존만 확인합니다. API 준비 검사가 통과해야 웹을 업로드합니다. 준비되지 않으면 우회하지 않습니다.
 - 동시 배포는 직렬화하고 진행 중인 배포를 취소하지 않습니다. API `/ready`와 미인증 API 401, 웹 `/`와 미인증 BFF 401 응답을 검사합니다. 자동 롤백은 없으며 이 검사가 실제 OAuth 로그인·AI 추론까지 증명하지는 않습니다.
 - 기존 리소스 설정 재적용은 [웹 설정 도구](scripts/configure_webapp.py)와 [백엔드 설정 도구](scripts/configure_backend.py), 값·권한과 최초 활성화 절차는 [중앙 설정 문서](docs/central-configuration.md)를 참고하세요. 설정 도구는 앱 코드를 배포하거나 Actions를 실행하지 않습니다.
 
@@ -224,11 +226,11 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 
 ### 기존 플랜 공유 백엔드
 
-[백엔드 템플릿](infra/backend.bicep)은 기존 리소스 그룹에서 플랜·Key Vault·App Configuration·배포 ID를 재사용하고 API, PostgreSQL B1ms/32GB, Managed Redis B0를 추가합니다. 새 이름은 `waglwaglagent-` 접두어를 사용하고 기본 리전은 Korea Central입니다. 기존 웹앱 이름은 URL과 OAuth callback을 유지하기 위해 변경하지 않습니다.
+[기존 백엔드 템플릿](infra/backend.bicep)은 API·PostgreSQL·Redis 초기 설계입니다. PostgreSQL B1ms 실제 할당이 `SkuNotAvailable`로 실패하여 **현재 운영에 재실행하지 않습니다.** [SQL 전용 템플릿](infra/sql.bicep)은 기존 API·Redis·B1을 변경하지 않고 Korea Central에 `waglwaglagent-sql`과 `waglwaglagent-db` Basic(5 DTU/2GB)을 추가합니다. Entra 관리자 OID와 실제 API `possibleOutboundIpAddresses` 배열을 매개변수로 전달합니다. 기존 웹앱 이름은 URL과 OAuth callback을 유지하기 위해 변경하지 않습니다.
 
-DB/cache의 사전 안내 목록가는 월 약 US$37 이상이며 기존 플랜·세금·네트워크·추가 백업 비용은 별도입니다. PostgreSQL 백업 보존은 7일, DB/cache HA는 꺼져 있습니다. 복원 실증과 암호화 키 보호는 별도 운영 절차가 필요합니다. 최초 DB 연결은 migration을 위해 서버 관리자 계정을 사용하므로 공개 운영 전 migration 계정과 최소 권한 런타임 계정을 분리해야 합니다.
+SQL Basic 목록가는 월 약 US$5.4, 기존 Redis B0와 합계 약 US$19.3이며 B1 플랜·세금·네트워크·추가 백업 비용은 별도입니다. SQL은 7일 보존·Local 백업, Redis는 HA 비활성입니다. SQL 로그인 암호 없이 API의 system Managed Identity와 검증된 TLS를 사용하며 방화벽은 API outbound IP만 허용합니다. [SQL 권한 도구](scripts/configure_sql_database.py)는 정확한 API principal SID에 `db_datareader`, `db_datawriter`, 시작 시 Alembic에 필요한 `db_ddladmin`을 부여합니다. `db_owner`는 사용하지 않습니다. 향후 migration을 배포 전용 작업으로 분리하면 API의 DDL 역할을 제거하세요.
 
-**현재 프로비저닝 차단:** Korea Central B1ms는 SKU 목록에 있어도 실제 생성에서 `SkuNotAvailable`을 반환했습니다. API와 Redis만 생성되었으며 DB·실제 앱 배포가 완료된 상태가 아닙니다. 상위 SKU·리전 변경은 비용과 지연을 확인하고 승인받은 뒤 진행합니다.
+Basic의 2GB에는 암호화한 대화·첨부도 포함됩니다. 5 DTU의 CPU/I/O와 DB 공간을 관찰하고 필요할 때 별도 승인 후 SQL tier를 높이세요. 웹 플랜만 올려도 DB 처리량·저장 한도는 바뀌지 않습니다. 백업 보존 설정은 복원 시험 완료를 뜻하지 않으며 원래 암호화 키도 보호해야 합니다. 임시 운영자 방화벽은 초기 권한 설정·SQL 검증 후 제거합니다.
 
 ### 별도 전체 인프라 템플릿
 
