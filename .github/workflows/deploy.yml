@@ -133,10 +133,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          az webapp deploy \
+          deployment_status=$(az webapp deploy \
             --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$AZURE_API_APP" --src-path "$RUNNER_TEMP/waglwaglagent-release/waglwaglagent-api.zip" \
-            --type zip --clean true --restart false --track-status false --output none
+            --type zip --clean true --restart false --async true --track-status false \
+            --timeout 1200000 --query status --output tsv)
+          if [[ "$deployment_status" != "4" ]]; then
+            echo "::error::API ZIP deployment did not reach Kudu success status 4."
+            exit 1
+          fi
           az webapp config set \
             --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$AZURE_API_APP" --startup-file "python start_api.py" \
@@ -164,12 +169,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          az webapp deploy \
+          deployment_status=$(az webapp deploy \
             --subscription "$AZURE_SUBSCRIPTION_ID" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$AZURE_WEB_APP" \
             --src-path "$RUNNER_TEMP/waglwaglagent-release/waglwaglagent.zip" \
-            --type zip --clean true --restart false --track-status false --output none
+            --type zip --clean true --restart false --async true --track-status false \
+            --timeout 1200000 --query status --output tsv)
+          if [[ "$deployment_status" != "4" ]]; then
+            echo "::error::Web ZIP deployment did not reach Kudu success status 4."
+            exit 1
+          fi
       - name: Activate standalone startup after successful upload
         shell: bash
         run: |

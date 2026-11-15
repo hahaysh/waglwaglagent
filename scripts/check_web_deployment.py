@@ -56,7 +56,7 @@ def validate_configuration(settings: list[dict], web_url: str) -> str:
     if not api_url:
         raise ValueError(
             "WAGL_API_URL is missing in production-web. Provision/configure the FastAPI backend "
-            "with production PostgreSQL/Redis before deploying the frontend."
+            "with production Azure SQL/Redis before deploying the frontend."
         )
     api_url = https_origin(api_url)
     if api_url == https_origin(web_url):
