@@ -162,8 +162,10 @@ API outbound IP만 허용하고 임시 운영자 규칙은 설정·검증 후 �
 | `WAGL_COPILOT_CLIENT_ID` | `waglwaglagent-production-copilot-id` |
 | `WAGL_COPILOT_CLIENT_SECRET` | `waglwaglagent-production-copilot-secret` |
 
-DB 생성 후 `scripts/configure_sql_database.py`에 실제 SQL 호스트·API principal ID·tenant를
-전달해 contained identity의 SID와 reader/writer/DDL 역할을 검증합니다.
+DB 생성 후 `scripts/configure_sql_database.py`에 실제 SQL 호스트·API의 Managed Identity
+application/client ID(`--client-id`)·tenant를 전달해 contained identity의 SID와 reader/writer/DDL
+역할을 검증합니다. TYPE=E 서비스 주체 SID에는 RBAC의 principal/object ID가 아닌 client ID를
+사용합니다. client ID는 해당 principal의 Entra servicePrincipal `appId`로 확인합니다.
 그 다음 준비된 Python 환경에서 `scripts/configure_backend.py`를
 명시적 `--subscription`, `--tenant`와 함께 실행합니다. 이 도구는 실제 호스트·공유 플랜·SKU를
 검사하고 DB/Redis URL을 Key Vault에 저장·재조회합니다. App Configuration에는 네이티브

@@ -1,5 +1,6 @@
 import base64
 import os
+import uuid
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,24 @@ def test_live_sql_migrations_encryption_nullable_accounts_and_cascade(monkeypatc
                     "SELECT COUNT(*) FROM messages WHERE id='sql-cascade-message'"
                 )).scalar_one() == 0
                 transaction.rollback()
+        saved_id = uuid.uuid4().hex
+        with Session(engine) as database:
+            database.add(Conversation(
+                id=saved_id, owner_id="github:sql-migration-test", title="Durable SQL test"
+            ))
+            database.commit()
+        engine.dispose()
+        try:
+            with Session(engine) as database:
+                saved = database.get(Conversation, saved_id)
+                assert saved.title == "Durable SQL test"
+        finally:
+            with Session(engine) as database:
+                saved = database.get(Conversation, saved_id)
+                if saved is not None:
+                    assert saved.owner_id == "github:sql-migration-test"
+                    database.delete(saved)
+                    database.commit()
     finally:
         engine.dispose()
         credential.close()

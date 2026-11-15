@@ -229,7 +229,7 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 
 [기존 백엔드 템플릿](infra/backend.bicep)은 API·PostgreSQL·Redis 초기 설계입니다. PostgreSQL B1ms 실제 할당이 `SkuNotAvailable`로 실패하여 **현재 운영에 재실행하지 않습니다.** [SQL 전용 템플릿](infra/sql.bicep)은 기존 API·Redis·B1을 변경하지 않고 Korea Central에 `waglwaglagent-sql`과 `waglwaglagent-db` Basic(5 DTU/2GB)을 추가합니다. Entra 관리자 OID와 실제 API `possibleOutboundIpAddresses` 배열을 매개변수로 전달합니다. 기존 웹앱 이름은 URL과 OAuth callback을 유지하기 위해 변경하지 않습니다.
 
-SQL Basic 목록가는 월 약 US$5.4, 기존 Redis B0와 합계 약 US$19.3이며 B1 플랜·세금·네트워크·추가 백업 비용은 별도입니다. SQL은 7일 보존·Local 백업, Redis는 HA 비활성입니다. SQL 로그인 암호 없이 API의 system Managed Identity와 검증된 TLS를 사용하며 방화벽은 API outbound IP만 허용합니다. [SQL 권한 도구](scripts/configure_sql_database.py)는 정확한 API principal SID에 `db_datareader`, `db_datawriter`, 시작 시 Alembic에 필요한 `db_ddladmin`을 부여합니다. `db_owner`는 사용하지 않습니다. 향후 migration을 배포 전용 작업으로 분리하면 API의 DDL 역할을 제거하세요.
+SQL Basic 목록가는 월 약 US$5.4, 기존 Redis B0와 합계 약 US$19.3이며 B1 플랜·세금·네트워크·추가 백업 비용은 별도입니다. SQL은 7일 보존·Local 백업, Redis는 HA 비활성입니다. SQL 로그인 암호 없이 API의 system Managed Identity와 검증된 TLS를 사용하며 방화벽은 API outbound IP만 허용합니다. [SQL 권한 도구](scripts/configure_sql_database.py)는 `--client-id`에 **API Managed Identity의 application/client ID**를 받아 TYPE=E SID와 `db_datareader`, `db_datawriter`, 시작 시 Alembic에 필요한 `db_ddladmin`을 검증합니다. Azure RBAC의 principal/object ID와 구별해야 합니다. `db_owner`는 사용하지 않습니다. 향후 migration을 배포 전용 작업으로 분리하면 API의 DDL 역할을 제거하세요.
 
 Basic의 2GB에는 암호화한 대화·첨부도 포함됩니다. 5 DTU의 CPU/I/O와 DB 공간을 관찰하고 필요할 때 별도 승인 후 SQL tier를 높이세요. 웹 플랜만 올려도 DB 처리량·저장 한도는 바뀌지 않습니다. 백업 보존 설정은 복원 시험 완료를 뜻하지 않으며 원래 암호화 키도 보호해야 합니다. 임시 운영자 방화벽은 초기 권한 설정·SQL 검증 후 제거합니다.
 

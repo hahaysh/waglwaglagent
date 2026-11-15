@@ -10,7 +10,8 @@ from configure_backend import sql_database_url
 
 def configure(args):
     sql_database_url(args.host, args.database)
-    principal = uuid.UUID(args.principal_id)
+    # TYPE=E uses the application/client ID for service principals, not their object ID.
+    principal = uuid.UUID(args.client_id)
     sid = principal.bytes_le.hex()
     credential = AzureCliCredential(tenant_id=args.tenant)
     connection = mssql_python.connect(
@@ -51,7 +52,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", required=True)
     parser.add_argument("--database", default="waglwaglagent-db")
     parser.add_argument("--tenant", required=True)
-    parser.add_argument("--principal-id", required=True)
+    parser.add_argument("--client-id", required=True)
     try:
         configure(parser.parse_args())
     except (mssql_python.Error, RuntimeError, ValueError) as error:

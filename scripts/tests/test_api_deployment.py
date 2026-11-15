@@ -1,15 +1,48 @@
 import importlib.util
 import json
 import sys
+import uuid
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from check_api_deployment import validate_api_configuration
 from configure_backend import database_url, redis_url
+from configure_sql_database import configure as configure_sql_database
 from package_api import package_api
+
+
+@pytest.mark.parametrize("matching_sid", [True, False])
+def test_sql_user_uses_managed_identity_client_id_and_rejects_another_sid(monkeypatch, matching_sid):
+    client_id = "11112222-3333-4444-5555-666677778888"
+    sid = uuid.UUID(client_id).bytes_le
+    cursor = Mock()
+    cursor.fetchone.return_value = (sid if matching_sid else bytes(16),)
+    cursor.fetchall.return_value = [(role,) for role in (
+        "db_datareader", "db_datawriter", "db_ddladmin",
+    )]
+    connection = Mock()
+    connection.cursor.return_value = cursor
+    credential = Mock()
+    monkeypatch.setattr("configure_sql_database.AzureCliCredential", lambda **_: credential)
+    monkeypatch.setattr("configure_sql_database.mssql_python.connect", lambda *_, **__: connection)
+    args = SimpleNamespace(
+        client_id=client_id, tenant="test-tenant",
+        host="test.database.windows.net", database="test-db",
+    )
+    if matching_sid:
+        configure_sql_database(args)
+    else:
+        with pytest.raises(RuntimeError, match="does not match"):
+            configure_sql_database(args)
+        assert not any("ALTER ROLE" in call.args[0] for call in cursor.execute.call_args_list)
+    assert f"SID=0x{sid.hex()}" in cursor.execute.call_args_list[0].args[0]
+    connection.close.assert_called_once()
+    credential.close.assert_called_once()
 
 
 def test_api_archive_contains_runtime_dependencies_and_migrations_not_tests(tmp_path):
