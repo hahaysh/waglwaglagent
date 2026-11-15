@@ -516,7 +516,7 @@ test("rejected attachments stay editable and unsupported files are explained", a
   await expect(page.locator(".message")).toHaveCount(0);
 });
 
-test("logged-out visitors see the workspace first and are sent to login only when they try to chat", async ({ page, request }, info) => {
+test("logged-out visitors see the workspace first and are sent to login only when they try to chat", { tag: "@oauth-disabled-guidance" }, async ({ page, request }, info) => {
   const errors: string[] = [];
   const gateway: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -536,8 +536,10 @@ test("logged-out visitors see the workspace first and are sent to login only whe
   await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveCount(0);
   for (const name of ["Microsoft 개인 계정으로 로그인", "Google로 로그인", "GitHub로 로그인"]) {
     const button = page.getByRole("button", { name, exact: true });
-    if (process.env.WAGL_TEST_AUTH_DISABLED) await expect(button).toBeDisabled();
-    else await expect(button).toBeEnabled();
+    if (process.env.WAGL_TEST_AUTH_DISABLED) {
+      await expect(button).toBeDisabled();
+      await expect(button.locator("..")).toContainText("운영자 설정 대기");
+    } else await expect(button).toBeEnabled();
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `test-results/${info.project.name}-login.png`, fullPage: true });

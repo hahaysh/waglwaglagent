@@ -70,7 +70,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
       - name: Test login setup guidance without OAuth
-        run: npm run test:e2e -- --grep 'logged-out workspace'
+        run: npm run test:e2e -- --grep '@oauth-disabled-guidance'
         env:
           WAGL_TEST_AUTH_DISABLED: "1"
       - run: npm run build
