@@ -221,6 +221,7 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 - ZIP은 Kudu에 비동기로 전달해 대용량 API의 HTTP 504를 피하며 CLI의 배포 상태 polling과 완료 상태 `4`를 확인합니다. 단순 접수 `202`나 백그라운드 처리 시작을 성공으로 간주하지 않고, 완료 후에만 시작 명령을 적용합니다.
 - **첫 배포 전제:** 실제 Azure SQL/Redis와 운영 GitHub 로그인·별도 Copilot OAuth가 필요합니다. API 업로드 전 네이티브 Key Vault 참조와 Copilot callback 확인을 검사합니다. API `/ready`는 실제 DB 쿼리와 Redis ping을 확인하고 `/health`는 프로세스 생존만 확인합니다. API 준비 검사가 통과해야 웹을 업로드합니다. 준비되지 않으면 우회하지 않습니다.
 - 동시 배포는 직렬화하고 진행 중인 배포를 취소하지 않습니다. API `/ready`와 미인증 API 401, 웹 `/`와 미인증 BFF 401 응답을 검사합니다. 자동 롤백은 없으며 이 검사가 실제 OAuth 로그인·AI 추론까지 증명하지는 않습니다.
+- 최초 웹 시작 중 Azure 기본 페이지는 `/`에 200, gateway에는 404를 반환할 수 있습니다. 따라서 기본 페이지 200이 아니라 실제 gateway 401을 재시도하며 확인한 뒤 웹 준비 완료로 판단합니다.
 - 기존 리소스 설정 재적용은 [웹 설정 도구](scripts/configure_webapp.py)와 [백엔드 설정 도구](scripts/configure_backend.py), 값·권한과 최초 활성화 절차는 [중앙 설정 문서](docs/central-configuration.md)를 참고하세요. 설정 도구는 앱 코드를 배포하거나 Actions를 실행하지 않습니다.
 
 `main` 변경으로 자동 배포가 시작되며, 운영 준비 조건이 부족하면 사전 검사에서 중단됩니다. 첫 배포 전 Azure 기본 안내 페이지는 실제 앱 배포 완료를 의미하지 않습니다.
