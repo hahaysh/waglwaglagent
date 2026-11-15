@@ -384,9 +384,13 @@ test("connection lookup failure can be retried from the composer without losing 
   expect(sends).toBe(0);
 });
 
-test("app test suggestions populate editable prompts without sending until explicit submission", async ({ page }) => {
+test("suggestions populate editable prompts without sending until explicit submission", async ({ page }) => {
   await login(page);
   let sends = 0, submitted: Record<string, unknown> | null = null;
+  const conversations = [
+    { id: "55555555-5555-4555-8555-555555555555", title: "회의 안건 정리해줘", created_at: new Date().toISOString() },
+    { id: "66666666-6666-4666-8666-666666666666", title: "여행 계획을 세워줘", created_at: new Date().toISOString() },
+  ];
   await page.route("**/api/gateway/**", async (route) => {
     const path = new URL(route.request().url()).pathname.replace("/api/gateway/", "");
     if (path === "chat") {
@@ -397,26 +401,33 @@ test("app test suggestions populate editable prompts without sending until expli
         + 'event: done\ndata: {"usage":{}}\n\n',
       });
     }
-    return route.fulfill({ json: path === "credentials" ? [credential] : [] });
+    return route.fulfill({ json: path === "credentials" ? [credential]
+      : path === "conversations" ? conversations : [] });
   });
   await page.goto("/");
   const input = page.getByRole("textbox", { name: "메시지", exact: true });
-  for (const [label, expected] of [
-    ["연결 테스트 · 한 줄 응답", "연결 성공"],
-    ["스트리밍·중지 테스트", "1부터 30까지"],
-    ["서비스 전환·대화 이력 테스트", "와글파랑"],
-  ]) {
-    await page.getByRole("button", { name: label, exact: true }).click();
-    await expect(input).toHaveValue(new RegExp(expected));
+  const suggestions = page.locator(".prompt-suggestions").getByRole("button");
+  await expect(suggestions).toHaveCount(3);
+  await expect(suggestions.nth(0)).toHaveAttribute("title", conversations[0].title);
+  await expect(suggestions.nth(1)).toHaveAttribute("title", conversations[1].title);
+  await expect(suggestions.nth(0)).toContainText("이전 질문");
+  await expect(suggestions.nth(1)).toContainText("이전 질문");
+  await expect(suggestions.nth(2)).not.toContainText("이전 질문");
+  for (let index = 0; index < 3; index++) {
+    const suggestion = suggestions.nth(index);
+    const expected = await suggestion.getAttribute("title");
+    if (!expected) throw new Error("Suggestion has no prompt");
+    await suggestion.click();
+    await expect(input).toHaveValue(expected);
     await expect(input).toBeFocused();
     await expect(page.locator(".message")).toHaveCount(0);
     expect(sends).toBe(0);
   }
   await expect(page.locator(".prompt-test-help")).toContainText("전송 시 포함 사용량이 소모될 수 있습니다");
-  await expect(page.locator(".prompt-test-help")).toContainText("응답 후 연결을 바꾸고");
-  await page.getByRole("button", { name: "연결 테스트 · 한 줄 응답", exact: true }).click();
+  await suggestions.first().click();
   await input.fill(`${await input.inputValue()} (수정한 초안)`);
   const draft = await input.inputValue();
+  await expect(page.getByRole("button", { name: "메시지 전송" })).toBeEnabled();
   await page.getByRole("button", { name: "메시지 전송" }).click();
   await expect(page.locator(".message.assistant")).toContainText("연결 성공");
   expect(sends).toBe(1);
