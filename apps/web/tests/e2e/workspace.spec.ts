@@ -124,7 +124,8 @@ test("account switches remount workspace and reject legacy site cookies", async 
     name: cookieName, value, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax",
   }]);
   await page.goto("/");
-  await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "생각이 이어지는 곳." })).toBeVisible();
+  await expect(page.locator(".account")).toHaveCount(0);
   await expect(page.getByText("Legacy private name")).toHaveCount(0);
 });
 
@@ -183,7 +184,7 @@ test("Copilot with an old blocked snapshot can submit for fresh server preflight
   await expect(page.locator(".message.assistant .message-author")).toContainText("GitHub Copilot");
   await expect(page.locator(".message.assistant .message-model")).toContainText("free-auto-model");
   expect(submitted).toMatchObject({ credential_id: copilot.id, prompt: "한국어로 대답해줘" });
-  await expect(page.getByText("선택한 연결만 사용", { exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "대화에 사용할 연결" })).toHaveValue(copilot.id);
   await expect(page.locator(".free-policy")).toHaveText("무료·구독 포함량 사용");
   await navigate(page, "내 연결");
   await expect(page.locator(".connection-row").filter({ hasText: copilot.label })).toContainText(
@@ -443,6 +444,7 @@ test("image paste and text upload are previewed, sent, and reopened with chat hi
         + 'event: done\ndata: {"usage":{}}\n\n',
       });
     }
+    if (path.endsWith("/verify")) return route.fulfill({ json: copilot });
     return route.fulfill({ json: path === "credentials" ? [copilot]
       : path === "conversations" ? saved.length ? [chat] : []
       : path === `conversations/${chat.id}` ? { messages: saved.map((message, index) => ({ id: String(index), status: "complete", ...message })) } : [] });
@@ -503,19 +505,31 @@ test("rejected attachments stay editable and unsupported files are explained", a
   await expect(page.locator(".message")).toHaveCount(0);
 });
 
-test("logged-out workspace is responsive and rejects unauthenticated API requests", async ({ page, request }, info) => {
+test("logged-out visitors see the workspace first and are sent to login only when they try to chat", async ({ page, request }, info) => {
   const errors: string[] = [];
+  const gateway: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", (call) => { if (call.url().includes("/api/gateway/")) gateway.push(call.url()); });
   await page.goto("/");
+  await expect(page.getByRole("heading", { name: "생각이 이어지는 곳." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "나만의 AI 연결, 나만의 작업공간." })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "로그인", exact: true }).first()).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: `test-results/${info.project.name}-guest-workspace.png`, fullPage: true });
+  await page.getByRole("textbox", { name: "메시지", exact: true }).fill("로그인 전 입력");
+  expect(gateway).toEqual([]);
+  await page.getByRole("button", { name: "메시지 전송" }).click();
+  await expect(page).toHaveURL(/\/login\?callbackUrl=%2F$/);
+  expect(gateway).toEqual([]);
   await expect(page.getByRole("heading", { name: "나만의 AI 연결, 나만의 작업공간." })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "연결 추가", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("navigation", { name: "주요 메뉴" })).toHaveCount(0);
   for (const name of ["Microsoft 개인 계정으로 로그인", "Google로 로그인", "GitHub로 로그인"]) {
     const button = page.getByRole("button", { name, exact: true });
     if (process.env.WAGL_TEST_AUTH_DISABLED) await expect(button).toBeDisabled();
     else await expect(button).toBeEnabled();
   }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: `test-results/${info.project.name}-login.png`, fullPage: true });
   expect((await request.get("/api/gateway/credentials")).status()).toBe(401);
   expect((await request.get("/api/gateway/unapproved-route")).status()).toBe(404);
   expect((await request.post("/api/connections/copilot/start")).status()).toBe(401);
@@ -524,8 +538,6 @@ test("logged-out workspace is responsive and rejects unauthenticated API request
   expect(callback.headers().location).toBe("http://127.0.0.1:3110/?connection=oauth_invalid_state");
   expect(callback.headers()["referrer-policy"]).toBe("no-referrer");
   expect(callback.headers()["cache-control"]).toBe("no-store");
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.screenshot({ path: `test-results/${info.project.name}-workspace.png`, fullPage: true });
   await page.getByRole("link", { name: "개인정보 처리 안내" }).click();
   await expect(page.getByRole("heading", { name: "개인정보 처리 안내", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
