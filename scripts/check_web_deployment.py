@@ -103,7 +103,7 @@ def main():
     )
     api_url = validate_configuration(settings, web_url)
     try:
-        with build_opener(NoRedirect()).open(api_url + "/health", timeout=20) as response:
+        with build_opener(NoRedirect()).open(api_url + "/ready", timeout=20) as response:
             if response.status != 200 or json.load(response).get("status") != "ok":
                 raise ValueError("The production FastAPI health check failed")
     except (URLError, TimeoutError, json.JSONDecodeError):

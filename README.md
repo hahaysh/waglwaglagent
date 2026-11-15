@@ -211,15 +211,24 @@ Python 의존성은 `services/api/requirements.lock`의 버전·해시로 고정
 ## GitHub Actions 배포
 
 - `Validate`: `main` 대상 PR과 수동 실행에서 API lint/테스트, 웹 lint/단위/E2E/빌드 및 런타임 의존성 감사를 수행합니다.
-- `Deploy waglwaglagent`: `main`의 모든 push(직접 push·PR 병합)와 `main`에서의 수동 실행으로 시작합니다. 검증 후 Ubuntu/Node 24에서 Next.js standalone을 빌드하고 ZIP을 기존 **`waglwaglagent_rg/waglwaglagent`** Linux Web App에 배포합니다. 이 워크플로는 웹 프런트만 배포하며 Docker·ACR을 사용하지 않습니다.
-- GitHub의 `azure-production` Environment는 `main` 브랜치만 허용합니다. `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_WEB_APP`, `AZURE_WEB_APP_URL`, `WAGL_APP_CONFIG_ENDPOINT`는 **비밀이 아닌 변수**입니다. 클라이언트 비밀·publish profile은 사용하지 않습니다.
+- `Deploy waglwaglagent`: `main`의 모든 push(직접 push·PR 병합)와 `main`에서의 수동 실행으로 시작합니다. 검증 후 Ubuntu에서 Next.js standalone(Node 24)과 API(Python 3.12)를 각각 ZIP으로 빌드합니다. **`waglwaglagent-api` → 기존 `waglwaglagent` 웹 순서**로 배포하며 두 앱은 기존 `waglwaglagent-asp` B1 플랜을 공유합니다. Docker·ACR을 사용하지 않습니다.
+- GitHub의 `azure-production` Environment는 `main` 브랜치만 허용합니다. `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_WEB_APP`, `AZURE_WEB_APP_URL`, `AZURE_API_APP`, `AZURE_API_URL`, `WAGL_APP_CONFIG_ENDPOINT`는 **비밀이 아닌 변수**입니다. 클라이언트 비밀·publish profile은 사용하지 않습니다.
 - OIDC subject는 GitHub OIDC API의 `sub_claim_prefix`에 `:environment:azure-production`을 붙입니다. 현재 저장소는 불변 ID를 포함한 `repo:hahaysh@24690076/waglwaglagent@1444424609:environment:azure-production`을 사용합니다. issuer는 `https://token.actions.githubusercontent.com`, audience는 `api://AzureADTokenExchange`입니다. 전용 배포 ID는 대상 Web App의 Website Contributor와 App Configuration Data Reader만 가지며 Key Vault secret을 직접 조회하지 않습니다.
 - Web App는 Node 24 LTS를 사용하고, Actions에서 ZIP 업로드가 성공한 뒤에만 `node server.js` 시작 명령을 적용합니다. 미배포 앱에 이 명령을 먼저 지정하면 파일이 없어 503이 발생합니다. 런타임 Managed Identity가 `production-web` 레이블과 운영용 Key Vault secret을 읽습니다. 운영 비밀은 빌드·ZIP·Actions 변수에 포함하지 않습니다.
-- **첫 배포 전제:** 운영 FastAPI/PostgreSQL/Redis, 실제 `WAGL_API_URL`, 운영 GitHub OAuth 앱·callback이 필요합니다. 업로드 전 사전 검사가 운영 URL·네이티브 Key Vault 참조·OAuth 확인 플래그·API `/health`를 검사합니다. 준비되지 않으면 명시적으로 실패하고 ZIP을 업로드하지 않습니다.
-- 동시 배포는 직렬화하고 진행 중인 배포를 취소하지 않습니다. 배포 후 웹 `/`와 미인증 BFF 401 응답을 검사합니다. 자동 롤백은 없으며 이 검사가 실제 OAuth 로그인·AI 추론까지 증명하지는 않습니다.
-- 기존 리소스 설정 재적용은 [설정 도구](scripts/configure_webapp.py), 값·권한과 최초 활성화 절차는 [중앙 설정 문서](docs/central-configuration.md)를 참고하세요. 설정 도구는 앱 코드를 배포하거나 Actions를 실행하지 않습니다.
+- API ZIP에는 해시 고정 Linux 의존성과 SDK의 고정 Copilot 런타임을 포함합니다. 업로드 성공 후에만 `python start_api.py`를 활성화하며, 시작 시 Alembic 실패는 서버 실행을 차단합니다. API는 한 worker로 실행합니다.
+- **첫 배포 전제:** 실제 PostgreSQL/Redis와 운영 GitHub 로그인·별도 Copilot OAuth가 필요합니다. API 업로드 전 네이티브 Key Vault 참조와 Copilot callback 확인을 검사합니다. API `/ready`는 실제 DB 쿼리와 Redis ping을 확인하고 `/health`는 프로세스 생존만 확인합니다. API 준비 검사가 통과해야 웹을 업로드합니다. 준비되지 않으면 우회하지 않습니다.
+- 동시 배포는 직렬화하고 진행 중인 배포를 취소하지 않습니다. API `/ready`와 미인증 API 401, 웹 `/`와 미인증 BFF 401 응답을 검사합니다. 자동 롤백은 없으며 이 검사가 실제 OAuth 로그인·AI 추론까지 증명하지는 않습니다.
+- 기존 리소스 설정 재적용은 [웹 설정 도구](scripts/configure_webapp.py)와 [백엔드 설정 도구](scripts/configure_backend.py), 값·권한과 최초 활성화 절차는 [중앙 설정 문서](docs/central-configuration.md)를 참고하세요. 설정 도구는 앱 코드를 배포하거나 Actions를 실행하지 않습니다.
 
 `main` 변경으로 자동 배포가 시작되며, 운영 준비 조건이 부족하면 사전 검사에서 중단됩니다. 첫 배포 전 Azure 기본 안내 페이지는 실제 앱 배포 완료를 의미하지 않습니다.
+
+### 기존 플랜 공유 백엔드
+
+[백엔드 템플릿](infra/backend.bicep)은 기존 리소스 그룹에서 플랜·Key Vault·App Configuration·배포 ID를 재사용하고 API, PostgreSQL B1ms/32GB, Managed Redis B0를 추가합니다. 새 이름은 `waglwaglagent-` 접두어를 사용하고 기본 리전은 Korea Central입니다. 기존 웹앱 이름은 URL과 OAuth callback을 유지하기 위해 변경하지 않습니다.
+
+DB/cache의 사전 안내 목록가는 월 약 US$37 이상이며 기존 플랜·세금·네트워크·추가 백업 비용은 별도입니다. PostgreSQL 백업 보존은 7일, DB/cache HA는 꺼져 있습니다. 복원 실증과 암호화 키 보호는 별도 운영 절차가 필요합니다. 최초 DB 연결은 migration을 위해 서버 관리자 계정을 사용하므로 공개 운영 전 migration 계정과 최소 권한 런타임 계정을 분리해야 합니다.
+
+**현재 프로비저닝 차단:** Korea Central B1ms는 SKU 목록에 있어도 실제 생성에서 `SkuNotAvailable`을 반환했습니다. API와 Redis만 생성되었으며 DB·실제 앱 배포가 완료된 상태가 아닙니다. 상위 SKU·리전 변경은 비용과 지연을 확인하고 승인받은 뒤 진행합니다.
 
 ### 별도 전체 인프라 템플릿
 

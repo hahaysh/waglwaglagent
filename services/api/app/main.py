@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -7,8 +8,9 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from redis.exceptions import RedisError
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.attachments import MAX_CONTEXT_IMAGE_BYTES, context_size, prepare_messages
@@ -42,6 +44,7 @@ from app.vault import SecretMissingError, SecretStoreError
 
 Owner = Annotated[str, Depends(authenticated_owner)]
 Database = Annotated[Session, Depends(session_for)]
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -96,6 +99,23 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/health")
 async def health():
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready(request: Request):
+    def check_database():
+        with request.app.state.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+
+    try:
+        await asyncio.to_thread(check_database)
+        redis = request.app.state.limits.redis
+        if redis is not None and not await redis.ping():
+            raise RedisError("Redis readiness check failed")
+    except (SQLAlchemyError, RedisError) as error:
+        logger.warning("API readiness failed (%s)", type(error).__name__)
+        return JSONResponse({"status": "unavailable"}, status_code=503)
     return {"status": "ok"}
 
 

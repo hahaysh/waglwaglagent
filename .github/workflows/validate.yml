@@ -20,6 +20,7 @@ jobs:
           persist-credentials: false
       - run: az bicep install
       - run: az bicep build --file infra/main.bicep --stdout > /dev/null
+      - run: az bicep build --file infra/backend.bicep --stdout > /dev/null
 
   api:
     name: API tests and lint

@@ -12,7 +12,9 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from redis.exceptions import RedisError
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -67,6 +69,27 @@ def headers(owner="github:1"):
         algorithm="HS256",
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_readiness_checks_database_and_redis(client, monkeypatch):
+    redis = SimpleNamespace(ping=AsyncMock(return_value=True), aclose=AsyncMock())
+    monkeypatch.setattr(app.state.limits, "redis", redis)
+    assert client.get("/ready").status_code == 200
+    redis.ping.assert_awaited_once()
+    redis.ping.side_effect = RedisError("unavailable")
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
+    assert client.get("/health").status_code == 200
+
+
+def test_readiness_blocks_database_outage(client, monkeypatch):
+    monkeypatch.setattr(app.state.engine, "connect", Mock(
+        side_effect=OperationalError("SELECT 1", {}, RuntimeError("unavailable")),
+    ))
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
 
 
 def add_key(client, **overrides):

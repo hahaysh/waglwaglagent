@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "postgresPassword": {
+      "reference": {
+        "keyVault": {
+          "id": "/subscriptions/199bfb5d-fa2d-4765-88cf-016129ccb7de/resourceGroups/waglwaglagent_rg/providers/Microsoft.KeyVault/vaults/waglwaglagent-kv"
+        },
+        "secretName": "waglwaglagent-production-postgres-password"
+      }
+    }
+  }
+}

@@ -102,7 +102,7 @@ App Service에는 환경·App Configuration endpoint/레이블 등 부트스트�
 - 웹의 시스템 할당 Managed Identity에는 해당 store의 App Configuration Data Reader,
   아래 네 개 운영 secret **각각의 범위에만** Key Vault Secrets User를 부여합니다.
   사용자 Copilot 토큰·로컬 비밀 전체를 읽을 권한은 부여하지 않습니다.
-- 전용 `waglwaglagent-github-deploy` Managed Identity에는 웹앱 범위 Website Contributor와
+- 전용 `waglwaglagent-github-deploy` Managed Identity에는 웹·API 각각의 범위 Website Contributor와
   store 범위 App Configuration Data Reader만 부여합니다. GitHub `azure-production`
   환경은 `main`만 허용하며 암호 없는 OIDC를 사용합니다.
   subject는 GitHub OIDC 설정 API의 `sub_claim_prefix`를 사용하므로 저장소의 불변 ID를
@@ -135,12 +135,44 @@ GitHub 앱 ID·비밀은 추측하거나 로컬 OAuth 앱에서 복사하지 않
    별도 준비하고 그 설정은 운영 API 레이블에서 참조합니다.
 3. 실제 등록과 secret 저장을 확인한 뒤에만 `production-web`의
    `WAGL_OAUTH_CALLBACK_CONFIRMED`를 `true`로 변경합니다. 기본값은 `false`입니다.
-4. `main`을 변경하면 검증 → 빌드 → 사전 검사 → 업로드 → 시작 명령 적용 순으로 진행합니다.
+4. `main`을 변경하면 검증 → 웹/API 빌드 → API 사전 검사·업로드·migration·준비 확인 →
+   웹 사전 검사·업로드·시작 명령 적용 순으로 진행합니다.
    API URL·OAuth 확인이 없으면 업로드 전에 실패합니다. Key Vault 실제 조회 권한과
    로그인·대화의 최종 검증은 첫 배포 이후 별도로 수행합니다.
 
-현재 설정만으로 운영 API/DB/Redis가 생성되거나 사이트가 배포되지는 않습니다.
-추가 유료 서비스를 암묵적으로 생성하지 않습니다.
+### 공유 플랜 백엔드와 운영 참조
+
+`infra/backend.bicep`은 기존 B1 플랜을 재사용합니다. API는 Python 3.12·한 worker,
+PostgreSQL은 B1ms/32GB·백업 7일, Redis는 B0·TLS·HA 비활성 후보입니다.
+현재 Korea Central PostgreSQL 생성은 `SkuNotAvailable`로 차단됐고
+API·Redis만 생성했습니다. SKU 목록·ARM validate 성공은 실제 할당 성공을 보장하지 않습니다.
+유료 SKU 또는 리전은 자동 변경하지 않습니다. DB가 없으면 배포 준비 검사를 통과시키지 않습니다.
+
+운영 Copilot OAuth 앱은 사이트 로그인과 별도로 등록했으며 callback은
+`<운영 웹 주소>/api/connections/copilot/callback`입니다. 로컬 앱·레이블은 유지합니다.
+`production-api`가 사용하는 참조는 다음과 같습니다. DB URL은 실제 생성 성공 후에만 저장합니다.
+
+| 설정 | Key Vault secret |
+|---|---|
+| `WAGL_INTERNAL_SECRET` | `waglwaglagent-production-internal-secret` |
+| `WAGL_ENCRYPTION_KEY` | `waglwaglagent-production-encryption-key` |
+| `WAGL_DATABASE_URL` | `waglwaglagent-production-database-url` |
+| `WAGL_REDIS_URL` | `waglwaglagent-production-redis-url` |
+| `WAGL_COPILOT_CLIENT_ID` | `waglwaglagent-production-copilot-id` |
+| `WAGL_COPILOT_CLIENT_SECRET` | `waglwaglagent-production-copilot-secret` |
+
+DB를 실제 생성한 후 기존 Python 환경에서 `scripts/configure_backend.py`를
+명시적 `--subscription`, `--tenant`와 함께 실행합니다. 이 도구는 실제 호스트·공유 플랜·SKU를
+검사하고 DB/Redis URL을 Key Vault에 저장·재조회합니다. App Configuration에는 네이티브
+참조와 일반 URL만 넣고 GitHub Environment에 API 대상 변수를 설정합니다.
+PostgreSQL은 `sslmode=verify-full&sslrootcert=system`, Redis는 `rediss`와 인증서 검증을
+사용합니다. 비밀은 명령 인자·GitHub 변수·ZIP에 넣지 않습니다.
+
+운영 암호화 키는 새 DB용으로 생성하며 로컬 데이터의 기존 키를 바꾸지 않습니다.
+첫 DB 연결은 migration을 위한 서버 관리자 계정이므로 공개 운영 전 runtime 계정을 분리하세요.
+백업 복원에는 DB뿐 아니라 원래 암호화 키도 필요합니다. 보존 7일 설정은 복원 시험 완료를
+뜻하지 않습니다. API·웹의 CPU/RAM은 공유하므로 우선 scale-up을 검토하고,
+API의 분산 취소·재시작 복구를 구현하기 전에는 scale-out하지 않습니다.
 
 ### 미배포 상태의 503 확인
 

@@ -2,6 +2,7 @@ param name string
 param location string
 param tags object
 param administratorLogin string
+param databaseName string = 'waglwaglagent'
 @secure()
 param administratorLoginPassword string
 param outboundIpRanges array = []
@@ -22,7 +23,7 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
 }
 resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
   parent: postgres
-  name: 'waglwaglagent'
+  name: databaseName
   properties: { charset: 'UTF8', collation: 'en_US.utf8' }
 }
 resource firewallRules 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = [for range in outboundIpRanges: {
