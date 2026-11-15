@@ -11,9 +11,11 @@ def package_api(source: Path, dependencies: Path, runtime: Path, output: Path):
         source / "alembic.ini", source / "start_api.py",
         dependencies / "uvicorn" / "__init__.py",
         runtime / "prebuilds" / "linux-x64" / "copilot",
+        runtime / "prebuilds" / "linux-x64" / "copilot-runtime",
         runtime / "prebuilds" / "linux-x64" / "runtime.node",
+        runtime / "prebuilds" / "linux-x64" / ".hostless-runtime-assets-v2",
     ):
-        if not required.is_file():
+        if not required.is_file() or required.stat().st_size == 0:
             raise ValueError(f"Missing API release file: {required.name}")
     if output.exists():
         raise ValueError("Output archive already exists")

@@ -23,7 +23,7 @@ def test_api_archive_contains_runtime_dependencies_and_migrations_not_tests(tmp_
     path = dependencies / "uvicorn" / "__init__.py"
     path.parent.mkdir(parents=True)
     path.write_text("dependency")
-    for name in ("copilot", "runtime.node"):
+    for name in ("copilot", "copilot-runtime", "runtime.node", ".hostless-runtime-assets-v2"):
         path = runtime / "prebuilds" / "linux-x64" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"binary")
@@ -34,6 +34,11 @@ def test_api_archive_contains_runtime_dependencies_and_migrations_not_tests(tmp_
         assert archive.read(".python_packages/lib/site-packages/uvicorn/__init__.py") == b"dependency"
         assert archive.read("copilot-runtime/prebuilds/linux-x64/copilot") == b"binary"
         assert "tests/private_test.py" not in archive.namelist()
+    marker = runtime / "prebuilds" / "linux-x64" / ".hostless-runtime-assets-v2"
+    marker.write_bytes(b"")
+    with pytest.raises(ValueError, match="Missing API release file"):
+        package_api(source, dependencies, runtime, tmp_path / "incomplete.zip")
+    marker.write_bytes(b"binary")
     (runtime / ".env").write_text("private")
     with pytest.raises(ValueError, match="private configuration"):
         package_api(source, dependencies, runtime, tmp_path / "unsafe.zip")

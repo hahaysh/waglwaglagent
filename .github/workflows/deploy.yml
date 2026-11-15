@@ -54,7 +54,7 @@ jobs:
           python -m pip install --require-hashes --only-binary=:all: \
             --target "$packages" -r services/api/requirements.lock
           PYTHONPATH="$packages" COPILOT_CLI_EXTRACT_DIR="$runtime" \
-            python -m copilot download-runtime
+            python -c "from copilot._cli_download import download_cli; download_cli()"
           python scripts/package_api.py --dependencies "$packages" --runtime "$runtime" \
             --output "$RUNNER_TEMP/waglwaglagent-api.zip"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
