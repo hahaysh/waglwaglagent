@@ -25,7 +25,11 @@ export type Endpoint = { id: string; name: string; context_length: number };
 
 const errors: Record<string, string> = {
   "Authentication required": "로그인이 필요합니다.",
-  "Authentication not configured": "GitHub 로그인 설정이 필요합니다.",
+  "Authentication not configured": "사이트 로그인 설정이 필요합니다.",
+  "Session expired": "사이트 세션이 만료되었습니다. 다시 로그인해주세요.",
+  "Session changed": "사이트 로그인 계정이 변경되었습니다. 새 작업공간을 확인해주세요.",
+  account_store_unavailable: "계정 저장소에 접근할 수 없습니다. 잠시 후 다시 시도해주세요.",
+  maintenance: "개인 작업공간 점검 중입니다. 잠시 후 다시 로그인해주세요.",
   "Policy service unavailable": "API 서버에 연결할 수 없습니다.",
   "Provider preflight timed out": "제공자 사전 확인 시간이 초과됐습니다.",
   "Service not configured": "서버 설정이 필요합니다.",
@@ -76,12 +80,19 @@ export function errorMessage(code: string): string {
   return errors[code] || "요청을 완료하지 못했습니다. 연결 상태를 확인해주세요.";
 }
 
-export async function api<T>(path: string, options?: RequestInit): Promise<T> {
+export function notifySessionChange() {
+  const channel = new BroadcastChannel("wagl-site-session");
+  channel.postMessage("changed"); channel.close();
+}
+
+export async function api<T>(path: string, options?: RequestInit, sessionId?: string): Promise<T> {
   const response = await fetch(`/api/gateway/${path}`, {
-    ...options, headers: { "Content-Type": "application/json", ...options?.headers }, cache: "no-store",
+    ...options, headers: { "Content-Type": "application/json", ...options?.headers,
+      ...(sessionId ? { "X-Wagl-Session": sessionId } : {}) }, cache: "no-store",
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
+    if (response.status === 401 || payload.detail === "Session changed") notifySessionChange();
     throw new Error(errorMessage(typeof payload.detail === "string" ? payload.detail : "unknown"));
   }
   return response.status === 204 ? undefined as T : response.json();

@@ -59,7 +59,8 @@ def read_secret(client: SecretClient, name: str, version: str | None = None) -> 
 
 def connection_secret_name(owner: str, record: str) -> str:
     digest = hashlib.sha256(f"{owner}:{record}".encode()).hexdigest()
-    return f"wagl-connection-{digest}"
+    prefix = "wagl-connection-" if owner.startswith("github:") else "waglwaglagent-connection-"
+    return f"{prefix}{digest}"
 
 
 def write_secret(client: SecretClient, name: str, value: str) -> str:

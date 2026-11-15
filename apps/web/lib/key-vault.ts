@@ -10,6 +10,7 @@ type SecretReader = {
 
 const fields = [
   "AUTH_SECRET", "AUTH_GITHUB_ID", "AUTH_GITHUB_SECRET", "WAGL_INTERNAL_SECRET",
+  "AUTH_GOOGLE_SECRET", "AUTH_MICROSOFT_ENTRA_ID_SECRET",
 ] as const;
 
 export async function resolveVaultEnvironment(
@@ -20,7 +21,7 @@ export async function resolveVaultEnvironment(
   for (const field of fields) {
     const value = env[field];
     if (!value) {
-      if (field !== "AUTH_GITHUB_ID" && field !== "AUTH_GITHUB_SECRET") {
+      if (field === "AUTH_SECRET" || field === "WAGL_INTERNAL_SECRET") {
         throw new Error(`Missing required Key Vault reference: ${field}`);
       }
       continue;
@@ -57,6 +58,7 @@ export async function loadVaultEnvironment(): Promise<void> {
     const allowed = new Set<string>([
       ...fields, "AUTH_URL", "AUTH_TRUST_HOST", "WAGL_API_URL", "WAGL_PUBLIC_URL",
       "WAGL_KEY_VAULT_URL", "NEXT_TELEMETRY_DISABLED",
+      "AUTH_GOOGLE_ID", "AUTH_MICROSOFT_ENTRA_ID_ID", "WAGL_MAINTENANCE_ENABLED",
     ]);
     try {
       for await (const setting of configuration.listConfigurationSettings({

@@ -1,4 +1,4 @@
-import { auth, authConfigured } from "@/auth";
+import { siteSession, authConfigured } from "@/auth";
 import { policyToken } from "@/lib/policy-token";
 import { boundedBody } from "@/lib/request-body";
 
@@ -23,9 +23,16 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
     return Response.json({ detail: "Not found" }, { status: 404 });
   }
   if (!authConfigured) return Response.json({ detail: "Authentication not configured" }, { status: 401 });
-  const session = await auth();
-  if (!session?.user?.id?.startsWith("github:")) {
+  let session;
+  try { session = await siteSession(); }
+  catch {
+    return Response.json({ detail: "account_store_unavailable" }, { status: 503 });
+  }
+  if (!session?.user?.id?.startsWith("user:") || !session.sessionId) {
     return Response.json({ detail: "Authentication required" }, { status: 401 });
+  }
+  if (request.headers.get("x-wagl-session") !== session.sessionId) {
+    return Response.json({ detail: "Session changed" }, { status: 409 });
   }
   if (request.method !== "GET" && request.headers.get("origin") !== process.env.WAGL_PUBLIC_URL) {
     return Response.json({ detail: "Invalid origin" }, { status: 403 });
@@ -42,7 +49,7 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
       return Response.json({ detail: "Input too large" }, { status: 413 });
     }
   }
-  const token = await policyToken(session.user.id);
+  const token = await policyToken(session.user.id, session.sessionId);
   const url = new URL(`/${route}`, process.env.WAGL_API_URL || "http://127.0.0.1:8000");
   if (route === "endpoints") url.searchParams.set("model", new URL(request.url).searchParams.get("model") || "");
   try {

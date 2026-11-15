@@ -28,9 +28,16 @@ def production_settings():
         "WAGL_KEY_VAULT_URL": "https://example.vault.azure.net/",
         "WAGL_API_URL": "https://api.azurewebsites.net",
         "WAGL_OAUTH_CALLBACK_CONFIRMED": "true",
+        "AUTH_GOOGLE_ID": "google-client",
+        "AUTH_MICROSOFT_ENTRA_ID_ID": "microsoft-client",
+        "WAGL_GOOGLE_CALLBACK_CONFIRMED": "true",
+        "WAGL_MICROSOFT_ENTRA_ID_CALLBACK_CONFIRMED": "true",
     }
     settings = [{"key": key, "value": value} for key, value in values.items()]
-    for key in ("AUTH_SECRET", "AUTH_GITHUB_ID", "AUTH_GITHUB_SECRET", "WAGL_INTERNAL_SECRET"):
+    for key in (
+        "AUTH_SECRET", "AUTH_GITHUB_ID", "AUTH_GITHUB_SECRET", "WAGL_INTERNAL_SECRET",
+        "AUTH_GOOGLE_SECRET", "AUTH_MICROSOFT_ENTRA_ID_SECRET",
+    ):
         settings.append({
             "key": key,
             "value": json.dumps({"uri": "https://example.vault.azure.net/secrets/example"}),
@@ -75,6 +82,9 @@ def test_production_preflight_accepts_native_references_and_separate_https_api()
     ("WAGL_API_URL", "https://example.azurewebsites.net", "separate FastAPI"),
     ("WAGL_OAUTH_CALLBACK_CONFIRMED", "false", "callback is not confirmed"),
     ("AUTH_SECRET", "private-plaintext-token", "native Key Vault"),
+    ("AUTH_GOOGLE_ID", "", "public client ID"),
+    ("WAGL_GOOGLE_CALLBACK_CONFIRMED", "false", "callback is not confirmed"),
+    ("WAGL_MICROSOFT_ENTRA_ID_CALLBACK_CONFIRMED", "false", "callback is not confirmed"),
 ])
 def test_preflight_blocks_incomplete_or_unsafe_production_configuration(key, value, reason):
     settings = production_settings()

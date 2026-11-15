@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
@@ -27,12 +28,16 @@ from app.security import (
 router = APIRouter()
 
 
-class OAuthStart(BaseModel):
+class OAuthBinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
     binding: SecretStr = Field(min_length=32, max_length=128)
 
 
-class OAuthComplete(OAuthStart):
+class OAuthStart(OAuthBinding):
+    approved: bool = Field(default=False, strict=True)
+
+
+class OAuthComplete(OAuthBinding):
     state: SecretStr = Field(min_length=32, max_length=128)
     code: SecretStr | None = Field(default=None, min_length=1, max_length=512)
     error: str | None = Field(default=None, max_length=100)
@@ -89,7 +94,10 @@ async def start(
     database.add(OAuthAttempt(
         id=attempt_id, owner_id=owner, provider="copilot", state_hash=key_fingerprint(state),
         binding_hash=key_fingerprint(body.binding.get_secret_value()),
-        encrypted_verifier=encrypt_key(verifier, owner, f"{attempt_id}:pkce"),
+        encrypted_verifier=encrypt_key(
+            json.dumps({"verifier": verifier, "approved": body.approved}),
+            owner, f"{attempt_id}:pkce",
+        ),
         redirect_uri=callback, expires_at=(now + timedelta(minutes=10)).isoformat(),
     ))
     database.commit()
@@ -193,10 +201,23 @@ async def complete_connection(
     database.commit()
     if claimed.rowcount != 1:
         raise HTTPException(409, "oauth_invalid_state")
-    verifier = decrypt_key(attempt.encrypted_verifier, owner, f"{attempt.id}:pkce")
+    proof = decrypt_key(attempt.encrypted_verifier, owner, f"{attempt.id}:pkce")
     attempt.encrypted_verifier = None
     database.commit()
     try:
+        approved = False
+        verifier = proof
+        if proof.startswith("{"):
+            try:
+                stored = json.loads(proof)
+                verifier, approved = stored["verifier"], stored["approved"]
+                if (
+                    not isinstance(verifier, str) or not 32 <= len(verifier) <= 128
+                    or type(approved) is not bool
+                ):
+                    raise ValueError("Invalid OAuth proof")
+            except (ValueError, KeyError, TypeError):
+                raise HTTPException(400, "oauth_invalid_state") from None
         if body.error or not body.code:
             raise HTTPException(400, "oauth_cancelled")
         if not configured():
@@ -233,7 +254,11 @@ async def complete_connection(
         credential.expires_at = tokens.get("expires_at")
         credential.auth_status = "authenticated"
         credential.status = "unverified"
-        credential.approved = False
+        credential.approved = approved or bool(
+            existing and existing.approved and existing.upstreams == ["github-copilot"]
+        )
+        if credential.approved:
+            credential.upstreams = ["github-copilot"]
         credential.consent_version = identifier()
         credential.checked_at = timestamp()
         credential.token_version = (credential.token_version or 0) + 1

@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     event,
+    inspect,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -63,6 +64,35 @@ class EncryptedAttachments(TypeDecorator):
         return json.loads(unseal(value["encrypted"], "messages.attachments"))
 
 
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+class LoginIdentity(Base):
+    __tablename__ = "login_identities"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    identity_key: Mapped[str] = mapped_column(String(64), unique=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    issuer: Mapped[str] = mapped_column(String(256))
+    subject: Mapped[str] = mapped_column(String(256))
+    name: Mapped[str] = mapped_column(EncryptedText("login_identities.name"))
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+
+
+class WebSession(Base):
+    __tablename__ = "web_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    identity_id: Mapped[str] = mapped_column(ForeignKey("login_identities.id"), index=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
+    expires_at: Mapped[str] = mapped_column(String(40))
+    revoked_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 class Credential(Base):
     __tablename__ = "credentials"
     __table_args__ = (
@@ -72,7 +102,7 @@ class Credential(Base):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
-    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
     provider: Mapped[str] = mapped_column(String(30))
     label: Mapped[str] = mapped_column(EncryptedText("credentials.label"))
     encrypted_key: Mapped[str] = mapped_column("encrypted_secret", Text)
@@ -101,7 +131,7 @@ class Credential(Base):
 class OAuthAttempt(Base):
     __tablename__ = "oauth_attempts"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
-    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
     provider: Mapped[str] = mapped_column(String(30))
     state_hash: Mapped[str] = mapped_column(String(64), unique=True)
     binding_hash: Mapped[str] = mapped_column(String(64))
@@ -115,7 +145,7 @@ class OAuthAttempt(Base):
 class Conversation(Base):
     __tablename__ = "conversations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
-    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(EncryptedText("conversations.title"))
     created_at: Mapped[str] = mapped_column(String(40), default=timestamp)
 
@@ -138,7 +168,7 @@ class Message(Base):
 class Run(Base):
     __tablename__ = "runs"
     id: Mapped[str] = mapped_column(String(160), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(String(100), index=True)
+    owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), index=True
     )
@@ -185,6 +215,12 @@ def initialize_database():
         Path(".local").mkdir(exist_ok=True)
     engine = make_engine(settings.database_url)
     if settings.environment == "local":
+        if inspect(engine).has_table("credentials") and not inspect(engine).has_table("users"):
+            engine.dispose()
+            raise RuntimeError(
+                "Legacy SQLite requires explicitly approved cleanup and Alembic migration "
+                "before personal accounts can start"
+            )
         Base.metadata.create_all(engine)
     return engine
 

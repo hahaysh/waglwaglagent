@@ -15,17 +15,142 @@ async function navigate(page: Page, name: string) {
   await page.getByRole("navigation", { name: "주요 메뉴" }).getByRole("button", { name }).click();
 }
 
-async function login(page: Page) {
+async function login(page: Page, options: { owner?: string; provider?: string; name?: string } = {}) {
   const cookieName = "authjs.session-token";
+  const owner = options.owner || "11111111-1111-4111-8111-111111111111";
+  const sid = crypto.randomUUID();
+  const expires = new Date(Date.now() + 3600000).toISOString();
+  await page.request.post("http://127.0.0.1:3199/fixture/session", { data: {
+    user_id: owner, session_id: sid, provider: options.provider || "github",
+    name: options.name || "테스트 사용자",
+    expires_at: expires,
+  } });
   const value = await encode({
-    token: { sub: "github:test-user", name: "테스트 사용자" },
+    token: { sub: `user:${owner}`, sid, accountVersion: 1, name: options.name || "테스트 사용자",
+      loginProvider: options.provider || "github", sessionExpires: expires },
     secret: "test-session-secret-only-not-for-production-0123456789",
     salt: cookieName, maxAge: 3600,
   });
   await page.context().addCookies([{
     name: cookieName, value, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax",
   }]);
+  return { owner, sid, expires };
 }
+
+test("account store errors hide private data without pretending the session expired", async ({ page }) => {
+  const session = await login(page);
+  await page.route("**/api/gateway/**", (route) => route.fulfill({ json: [] }));
+  await page.goto("/");
+  const prompt = page.getByRole("textbox", { name: "메시지", exact: true });
+  await prompt.fill("private outage draft");
+  const refresh = page.waitForResponse((response) => response.url().endsWith("/api/auth/session"));
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await refresh;
+  await expect(prompt).toHaveValue("private outage draft");
+  const fixture = {
+    user_id: session.owner, session_id: session.sid, provider: "github",
+    name: "테스트 사용자", expires_at: session.expires,
+  };
+  await page.request.post("http://127.0.0.1:3199/fixture/session", {
+    data: { ...fixture, unavailable: true },
+  });
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("wagl-site-session");
+    channel.postMessage("changed"); channel.close();
+  });
+  await expect(page.getByText("계정 저장소에 접근할 수 없습니다.", { exact: false })).toBeVisible();
+  await expect(prompt).toHaveCount(0);
+  expect((await page.request.get("/api/auth/session")).status()).toBe(503);
+  await expect(page).toHaveURL("/");
+  await page.request.post("http://127.0.0.1:3199/fixture/session", { data: fixture });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(prompt).toHaveValue("");
+});
+
+test("site logout clears personal data in other tabs without deleting the connection", async ({ page }) => {
+  await login(page, { provider: "google" });
+  await page.route("**/api/gateway/**", (route) => route.fulfill({
+    json: route.request().url().endsWith("/credentials") ? [credential] : [],
+  }));
+  await page.goto("/");
+  await expect(page.locator(".account")).toContainText("Google");
+  await page.getByRole("textbox", { name: "메시지", exact: true }).fill("logout-private-draft");
+  const other = await page.context().newPage();
+  await other.route("**/api/gateway/**", (route) => route.fulfill({ json: [] }));
+  await other.goto("/");
+  await expect(other.locator(".account")).toContainText("Google");
+  const menu = page.getByRole("button", { name: "메뉴 열기" });
+  if (await menu.isVisible()) await menu.click();
+  await page.getByRole("button", { name: "로그아웃", exact: true }).click();
+  await expect(page).toHaveURL(/\/login/);
+  await expect(other).toHaveURL(/\/login/);
+  await expect(page.getByText("logout-private-draft")).toHaveCount(0);
+  expect((await page.request.get("/api/gateway/credentials")).status()).toBe(401);
+  await login(page, { provider: "google" });
+  await page.goto("/");
+  await expect(page.locator(".connection-indicator")).toContainText("1개 연결");
+  await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveValue("");
+  await other.close();
+});
+
+test("account switches remount workspace and reject legacy site cookies", async ({ page }) => {
+  const previous = await login(page, { name: "사용자 A" });
+  await page.route("**/api/gateway/**", (route) => route.fulfill({ json: [] }));
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "메시지", exact: true }).fill("private A draft");
+  await login(page, {
+    owner: "22222222-2222-4222-8222-222222222222", name: "사용자 B",
+    provider: "microsoft-entra-id",
+  });
+  const stale = await page.request.post("/api/gateway/chat", {
+    headers: { Origin: "http://127.0.0.1:3110", "X-Wagl-Session": previous.sid }, data: {},
+  });
+  expect(stale.status()).toBe(409);
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("wagl-site-session");
+    channel.postMessage("changed"); channel.close();
+  });
+  await expect(page.locator(".account")).toContainText("사용자 B");
+  await expect(page.locator(".account")).toContainText("Microsoft 개인 계정");
+  await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveValue("");
+  await page.context().clearCookies();
+  const cookieName = "authjs.session-token";
+  const value = await encode({
+    token: { sub: "github:old-user", name: "Legacy private name" },
+    secret: "test-session-secret-only-not-for-production-0123456789",
+    salt: cookieName, maxAge: 3600,
+  });
+  await page.context().addCookies([{
+    name: cookieName, value, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax",
+  }]);
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Legacy private name")).toHaveCount(0);
+});
+
+test("expired server sessions block existing cookies and clear workspace", async ({ page }) => {
+  const fixture = await login(page);
+  await page.route("**/api/gateway/**", (route) => route.fulfill({ json: [] }));
+  const hydrated = page.waitForResponse((response) => response.url().endsWith("/api/gateway/credentials"));
+  await page.goto("/");
+  await hydrated;
+  await expect(page.locator(".account")).toBeVisible();
+  await page.request.post("http://127.0.0.1:3199/fixture/session", { data: {
+    user_id: fixture.owner, session_id: fixture.sid, name: "테스트 사용자", provider: "github",
+    expires_at: new Date(Date.now() - 1000).toISOString(),
+  } });
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("wagl-site-session");
+    channel.postMessage("changed"); channel.close();
+  });
+  await expect(page).toHaveURL(/\/login\?error=SessionExpired/);
+  await expect(page.getByRole("alert").filter({ hasText: "사이트 세션" })).toContainText("만료");
+  expect((await page.request.get("/api/gateway/credentials")).status()).toBe(401);
+  const expired = await page.request.post("/api/auth/session", {
+    headers: { Origin: "http://127.0.0.1:3110" }, data: {},
+  });
+  expect(await expired.json()).toBeNull();
+});
 
 test("Copilot with an old blocked snapshot can submit for fresh server preflight and streamed chat", async ({ page }) => {
   await login(page);
@@ -47,6 +172,7 @@ test("Copilot with an old blocked snapshot can submit for fresh server preflight
         + 'event: done\ndata: {"usage":{}}\n\n',
       });
     }
+    if (path.endsWith("/verify")) return route.fulfill({ json: copilot });
     return route.fulfill({ json: path === "credentials" ? [credential, copilot] : [] });
   });
   await page.goto("/");
@@ -95,7 +221,7 @@ test("Copilot already using overage remains blocked without sending a prompt", a
   await expect(input).toHaveValue("Hi");
   await expect(page.getByRole("button", { name: "메시지 전송" })).toBeDisabled();
   await connectionStatus.getByRole("button", { name: "내 Copilot 이용 조건 다시 확인" }).click();
-  await expect.poll(() => checks).toBe(1);
+  await expect.poll(() => checks).toBe(2);
   await expect(connectionStatus).toContainText("입력한 메시지는 전송되지 않았습니다");
   await expect(input).toHaveValue("Hi");
   await expect(page.locator(".message")).toHaveCount(0);
@@ -104,12 +230,86 @@ test("Copilot already using overage remains blocked without sending a prompt", a
   await expect(row).toContainText("과금 방지 차단 · 이미 초과 사용 중");
   await expect(row).toContainText("공식 조회 플랜: enterprise");
   await row.getByRole("button", { name: "내 Copilot 이용 조건 다시 확인" }).click();
-  await expect.poll(() => checks).toBe(2);
+  await expect.poll(() => checks).toBe(3);
   await expect(row).toContainText("한도 갱신을 기다리거나 다른 연결을 사용하세요.");
   await expect(row).not.toContainText("Copilot Free만 지원");
   expect(sends).toBe(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test("Copilot connection forwards explicit consent through the authenticated BFF", async ({ page }) => {
+  const session = await login(page);
+  const malformed = await page.request.post("/api/connections/copilot/start", {
+    headers: { Origin: "http://127.0.0.1:3110", "X-Wagl-Session": session.sid }, data: {},
+  });
+  expect(malformed.status()).toBe(422);
+  await page.route("**/api/gateway/**", (route) => route.fulfill({
+    json: route.request().url().endsWith("/connection-options") ? { copilot_oauth: true } : [],
+  }));
+  await page.route("https://github.com/login/oauth/authorize?**", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<h1>Mock GitHub approval</h1>" }));
+  await page.goto("/");
+  await navigate(page, "내 연결");
+  await page.getByRole("button", { name: "연결 추가", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "GitHub Copilot" }).click();
+  await expect(page.getByRole("dialog")).toContainText("대화·이력·첨부를 GitHub Copilot");
+  const response = page.waitForResponse((result) => result.url().endsWith("/api/connections/copilot/start"));
+  await page.getByRole("button", { name: "동의하고 Copilot 연결" }).click();
+  const started = await response;
+  expect(started.status()).toBe(200);
+  expect(started.request().postDataJSON()).toEqual({ approved: true });
+  await expect(page.getByRole("heading", { name: "Mock GitHub approval" })).toBeVisible();
+});
+
+for (const available of [true, false]) {
+  test(`Copilot conditions are automatically checked and ${available ? "enable use" : "fail closed"} without granting legacy consent`, async ({ page }) => {
+    await login(page);
+    const copilot = {
+      ...credential, provider: "copilot", label: "자동 확인 연결", model: null,
+      upstreams: ["github-copilot"], auth_type: "oauth", status: "unverified",
+      usage_state: "copilot_check_required",
+    };
+    const inactive = { ...copilot, id: "55555555-5555-4555-8555-555555555555",
+      label: "기존 미동의 연결", approved: false, usage_state: "consent_required" };
+    let checks = 0, sends = 0, writes = 0;
+    let release!: () => void;
+    const verification = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("**/api/gateway/**", async (route) => {
+      const path = new URL(route.request().url()).pathname.replace("/api/gateway/", "");
+      if (route.request().method() === "PATCH") writes++;
+      if (path.endsWith("/verify")) {
+        expect(path).toBe(`credentials/${copilot.id}/verify`);
+        checks++;
+        await verification;
+        return available
+          ? route.fulfill({ json: { ...copilot, model: "auto", status: "valid", usage_state: "available" } })
+          : route.fulfill({ status: 503, json: { detail: "verification_unavailable" } });
+      }
+      if (path === "chat") sends++;
+      return route.fulfill({ json: path === "credentials" ? [copilot, inactive] : [] });
+    });
+    await page.goto("/");
+    const input = page.getByRole("textbox", { name: "메시지", exact: true });
+    await input.fill("자동 조회 중 초안");
+    await expect.poll(() => checks).toBe(1);
+    await expect(page.getByRole("button", { name: "메시지 전송" })).toBeDisabled();
+    release();
+    if (available) {
+      await expect(page.getByRole("button", { name: "메시지 전송" })).toBeEnabled();
+    } else {
+      await expect(page.getByRole("status", { name: "대화 연결 상태" })).toContainText("이용 조건 자동 확인 실패");
+      await expect(page.locator(".alert")).toContainText("자동 확인 연결");
+      await expect(page.getByRole("button", { name: "메시지 전송" })).toBeDisabled();
+    }
+    await expect(input).toHaveValue("자동 조회 중 초안");
+    await navigate(page, "내 연결");
+    await expect(page.locator(".connection-row").filter({ hasText: "자동 확인 연결" }).getByRole("switch")).toBeChecked();
+    await expect(page.locator(".connection-row").filter({ hasText: "기존 미동의 연결" }).getByRole("switch")).not.toBeChecked();
+    expect(checks).toBe(1);
+    expect(writes).toBe(0);
+    expect(sends).toBe(0);
+  });
+}
 
 test("chat recheck enables a retained draft without automatically sending it", async ({ page }) => {
   await login(page);
@@ -118,12 +318,13 @@ test("chat recheck enables a retained draft without automatically sending it", a
     upstreams: ["github-copilot"], auth_type: "oauth", status: "unverified",
     usage_state: "copilot_overage_in_use",
   };
-  let sends = 0, submitted: Record<string, unknown> | null = null;
+  let sends = 0, checks = 0, submitted: Record<string, unknown> | null = null;
   let release!: () => void;
   const verification = new Promise<void>((resolve) => { release = resolve; });
   await page.route("**/api/gateway/**", async (route) => {
     const path = new URL(route.request().url()).pathname.replace("/api/gateway/", "");
     if (path.endsWith("/verify")) {
+      if (++checks === 1) return route.fulfill({ json: connection });
       await verification;
       connection = { ...connection, status: "valid", usage_state: "available" };
       return route.fulfill({ json: connection });
@@ -306,10 +507,15 @@ test("logged-out workspace is responsive and rejects unauthenticated API request
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "새 대화", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "연결 테스트 · 한 줄 응답" }).click();
-  await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveValue("연결 테스트입니다. 다른 설명 없이 '연결 성공'이라고만 답해주세요.");
-  await expect(page.getByRole("button", { name: "메시지 전송" })).toBeDisabled();
+  await expect(page.getByRole("heading", { name: "나만의 AI 연결, 나만의 작업공간." })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "메시지", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "연결 추가", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "주요 메뉴" })).toHaveCount(0);
+  for (const name of ["Microsoft 개인 계정으로 로그인", "Google로 로그인", "GitHub로 로그인"]) {
+    const button = page.getByRole("button", { name, exact: true });
+    if (process.env.WAGL_TEST_AUTH_DISABLED) await expect(button).toBeDisabled();
+    else await expect(button).toBeEnabled();
+  }
   expect((await request.get("/api/gateway/credentials")).status()).toBe(401);
   expect((await request.get("/api/gateway/unapproved-route")).status()).toBe(404);
   expect((await request.post("/api/connections/copilot/start")).status()).toBe(401);
@@ -319,54 +525,27 @@ test("logged-out workspace is responsive and rejects unauthenticated API request
   expect(callback.headers()["referrer-policy"]).toBe("no-referrer");
   expect(callback.headers()["cache-control"]).toBe("no-store");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  if (info.project.name === "desktop") {
-    expect(await page.locator(".provider-logo img").evaluateAll((images) => images.every((image) => (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
-  }
   await page.screenshot({ path: `test-results/${info.project.name}-workspace.png`, fullPage: true });
-  await navigate(page, "내 연결");
-  await expect(page.getByRole("heading", { name: "로그인 후 연결을 등록하세요" })).toBeVisible();
-  const addConnection = page.getByRole("button", { name: "연결 추가", exact: true });
-  await expect(addConnection).toBeEnabled();
-  await addConnection.click();
-  const help = page.getByRole("dialog");
-  await expect(help).toBeVisible();
-  for (const name of ["GitHub Copilot", "ChatGPT", "Gemini", "Claude", "OpenRouter"]) {
-    await help.getByRole("button", { name, exact: false }).click();
-    await expect(help.locator(".connection-guide > ol > li")).toHaveCount(5);
-    await expect(help.locator(".connection-guide h3")).toHaveText(`${name} 처음 연결하는 방법`);
-    await expect(help.locator(".provider-doc-link")).toHaveAttribute("target", "_blank");
-    const formBox = await help.locator(".connection-form-panel").boundingBox();
-    const guideBox = await help.locator(".connection-guide").boundingBox();
-    expect(formBox).not.toBeNull();
-    expect(guideBox).not.toBeNull();
-    if (info.project.name === "desktop") {
-      expect(guideBox!.x).toBeGreaterThanOrEqual(formBox!.x + formBox!.width);
-    } else {
-      expect(guideBox!.y).toBeGreaterThanOrEqual(formBox!.y + formBox!.height);
-    }
-    await expect(help.getByPlaceholder("API 키", { exact: true })).toHaveCount(0);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  }
-  if (process.env.WAGL_TEST_AUTH_DISABLED) {
-    await expect(help).toContainText("사이트 로그인 준비 중");
-    await help.getByRole("button", { name: "운영자 설정 안내" }).click();
-    await expect(page.getByRole("heading", { name: "GitHub 로그인 설정이 필요합니다" })).toBeVisible();
-    await expect(page.getByRole("dialog")).toContainText("AUTH_GITHUB_ID");
-    const loginExample = page.getByRole("dialog").getByRole("img", { name: /GitHub 사이트 로그인용 OAuth 앱 등록 예시/ });
-    await loginExample.scrollIntoViewIfNeeded();
-    await expect.poll(() => loginExample.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
-    await page.getByRole("button", { name: "닫기", exact: true }).click();
-  } else {
-    await expect(help.getByRole("button", { name: "GitHub로 사이트 로그인" })).toBeEnabled();
-    await help.getByRole("button", { name: "연결 창 닫기", exact: true }).click();
-  }
-  await expect(help).not.toBeVisible();
-  await navigate(page, "사용 기록");
-  await expect(page.getByRole("heading", { name: "아직 사용 기록이 없습니다" })).toBeVisible();
+  await page.getByRole("link", { name: "개인정보 처리 안내" }).click();
+  await expect(page.getByRole("heading", { name: "개인정보 처리 안내", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
+test("ChatGPT shows the official sign-in approval state without accepting an API key", async ({ page }) => {
+  await login(page);
+  await page.goto("/");
+  await navigate(page, "내 연결");
+  await page.getByRole("button", { name: "연결 추가", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "AI 서비스 연결" });
+  await dialog.getByRole("button", { name: "ChatGPT" }).click();
+  await expect(dialog).toContainText("승인 대기 중 · 아직 연결할 수 없습니다");
+  await expect(dialog).toContainText("원격 호스팅 웹은 OpenAI의 별도 승인이 필요");
+  await expect(dialog.getByPlaceholder("API 키")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "동의하고 연결" })).toHaveCount(0);
+});
+
 test("Copilot setup guide displays both supplied registration screenshots without leaving the form", async ({ page }) => {
+  await login(page);
   await page.goto("/?connect=copilot");
   const dialog = page.getByRole("dialog", { name: "AI 서비스 연결" });
   const guide = dialog.locator(".oauth-setup-guide");
@@ -417,7 +596,7 @@ test("authenticated personal key consent, streaming, masking and deletion", asyn
     if (path === "credentials" && route.request().method() === "POST") {
       submitted = route.request().postDataJSON();
       keys = [...keys, { ...credential, id: "33333333-3333-4333-8333-333333333333", label: "새 개인 연결",
-        approved: false, usage_state: "consent_required" }];
+        approved: true, usage_state: "available" }];
       return route.fulfill({ status: 201, json: keys.at(-1) });
     }
     if (path.startsWith("credentials/") && route.request().method() === "PATCH") {
@@ -437,7 +616,7 @@ test("authenticated personal key consent, streaming, masking and deletion", asyn
   await page.getByRole("button", { name: "연결 추가", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.getByRole("dialog").getByRole("button", { name: "GitHub Copilot" }).click();
-  await expect(page.getByRole("button", { name: "GitHub로 Copilot 연결" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "동의하고 Copilot 연결" })).toBeDisabled();
   await expect(page.getByRole("dialog")).toContainText("운영자 OAuth 설정 필요");
   await page.getByRole("dialog").getByRole("button", { name: "OpenRouter" }).click();
   await page.getByRole("textbox", { name: "연결 이름" }).fill("새 개인 연결");
@@ -448,15 +627,13 @@ test("authenticated personal key consent, streaming, masking and deletion", asyn
   await expect(page.getByPlaceholder("API 키", { exact: true })).toHaveAttribute("type", "password");
   await page.getByLabel("무료 모델", { exact: true }).selectOption("test/model:free");
   await page.getByRole("checkbox", { name: "테스트 처리업체" }).check();
-  await expect(page.getByRole("dialog")).toContainText("저장 시에는 비활성");
+  await expect(page.getByRole("dialog")).toContainText("대화·이력·첨부를 OpenRouter 및 선택한 실제 처리업체");
   await page.screenshot({ path: `test-results/${info.project.name}-connection.png`, fullPage: true });
-  await page.getByRole("button", { name: "키 확인 후 저장" }).click();
+  await page.getByRole("button", { name: "동의하고 연결" }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
-  expect(submitted).toMatchObject({ approved: false, upstreams: ["test/bf16"], provider: "openrouter" });
+  expect(submitted).toMatchObject({ approved: true, upstreams: ["test/bf16"], provider: "openrouter" });
   const savedCard = page.locator(".connection-row").filter({ hasText: "새 개인 연결" });
-  await expect(savedCard).toContainText("전송 동의 필요");
-  await expect(savedCard.getByRole("switch")).not.toBeChecked();
-  await savedCard.getByRole("switch").click();
+  await expect(savedCard.getByRole("switch")).toBeChecked();
   await expect(savedCard).toContainText("사용 가능");
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain("test-private-key");
   await navigate(page, "대화");

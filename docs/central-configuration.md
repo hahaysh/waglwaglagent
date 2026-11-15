@@ -5,7 +5,7 @@
 - `waglwaglagent-config` App Configuration: 일반 설정 및 **네이티브 Key Vault 참조**.
   로컬은 `local-api`, `local-web`, Azure 운영은 `production-api`, `production-web` 레이블을 사용합니다.
 - `waglwaglagent-kv` Key Vault: 내부 인증 비밀, 기존 AES-256 암호화 키,
-  Auth.js 비밀, GitHub 로그인·Copilot OAuth 설정, DB·Redis 인증 정보,
+  Auth.js 비밀, Microsoft·Google·GitHub 사이트 로그인과 별도 Copilot OAuth secret, DB·Redis 인증 정보,
   사용자별 AI API 키와 OAuth access/refresh token 묶음.
 - DB: 사용자 연결 비밀은 `kv://이름/버전` 참조만 보관합니다.
   제목·메시지·첨부·연결 이름은 AES-GCM으로 암호화합니다.
@@ -38,6 +38,68 @@ Key Vault 네트워크 I/O는 API 이벤트 루프 밖에서 실행하여 조회
 설정·비밀 조회 실패는 시작/요청을 차단하며 로컬 평문이나 다른 계정으로 대체하지 않습니다.
 Vault의 soft-delete 보존 기간에는 삭제된 secret이 권한 있는 운영자에 의해 복구될 수 있습니다.
 연결 삭제는 발급처 API 키 폐기와 같지 않으며 OAuth 철회 실패 안내도 유지합니다.
+
+## 개인 사이트 인증 설정
+
+사이트 로그인과 AI 연결 인증은 별개입니다. Microsoft 개인 계정·Google·기존 GitHub 로그인을 지원하며,
+내부 User UUID와 LoginIdentity를 사용합니다. 동일 이메일을 자동 병합하지 않습니다.
+표시 이름은 DB에서 암호화하고 사이트 access/refresh token은 저장하지 않습니다.
+WebSession의 만료·폐기 상태를 BFF/API에서 검증하므로 브라우저별 로그아웃 이후의 이전 token도 거부합니다.
+
+사이트 로그인만으로 AI 전송 동의를 승인하지 않습니다. 연결 화면의 **동의하고 연결**로
+본인 연결에 동의를 저장하며, Copilot은 OAuth 시작 시 동의를 PKCE verifier와 함께 암호화해
+요청에 결합합니다. 같은 계정 재연결·재로그인에는 기존 동의를 유지하고 미동의 연결은
+자동 활성화하지 않습니다. 동의한 Copilot 연결은 연결 완료·재로그인 때 이용 조건을
+자동 조회합니다. 조회에 프롬프트·첨부를 보내지 않으며, 실패·소진·무료 자격 미확인 시
+전송을 차단합니다. 매 전송 전 포함량·무료 정책 검사는 계속 적용합니다.
+
+| 제공자 | 일반 설정 (App Configuration) | 비밀 (Key Vault 네이티브 참조) | callback |
+|---|---|---|---|
+| Microsoft 개인 | `AUTH_MICROSOFT_ENTRA_ID_ID` | `AUTH_MICROSOFT_ENTRA_ID_SECRET` | `/api/auth/callback/microsoft-entra-id` |
+| Google | `AUTH_GOOGLE_ID` | `AUTH_GOOGLE_SECRET` | `/api/auth/callback/google` |
+| GitHub (유지) | 기존 구성 유지 | 기존 `AUTH_GITHUB_ID`·`AUTH_GITHUB_SECRET` 참조 유지 | `/api/auth/callback/github` |
+
+- Microsoft 개인 전용 앱으로 등록하고 기본 Graph `User.Read`를 추가하지 않습니다.
+  개인 전용 authorize endpoint와 실제 개인 tenant issuer를 구분하며, 서명·issuer·audience·만료·nonce/state·PKCE를 검증합니다.
+- Google은 local test와 production 프로젝트·Web OAuth 클라이언트를 분리합니다.
+  운영 클라이언트에 localhost 주소를 넣지 않습니다. scope는 두 제공자 모두 `openid profile email`만입니다.
+- `python -m scripts.configure_site_login --help`는 루트에서 실행합니다.
+  Microsoft는 **새 개인 전용 앱만** 생성하며 기존 앱의 secret을 자동 회전하지 않습니다.
+  Google은 공식 콘솔에서 내려받은 Web client JSON을 `--google-client-json`으로 받아 비밀을 직접 Key Vault로 저장합니다.
+  다운로드한 비밀 파일은 채팅·git·배포 artifact에 넣지 않고 저장 검증 후 정확한 임시 파일만 정리합니다.
+- 환경은 `--environment local|production`, 실제 origin은 `--public-url`, Azure 대상은 명시적 tenant/subscription/RG/vault/configuration으로 지정합니다.
+  이 도구는 앱 코드 업로드·Google 앱 공개·GitHub/Copilot 변경을 수행하지 않습니다.
+- 운영 웹 MI에 신규 secret 이름 각각의 Secrets User를 부여합니다.
+  일반 설정의 `WAGL_GOOGLE_CALLBACK_CONFIRMED`, `WAGL_MICROSOFT_ENTRA_ID_CALLBACK_CONFIRMED`는
+  실제 등록된 callback 확인 후에만 true로 설정합니다. 배포 preflight는 이 값과 secret 참조를 검증합니다.
+- callback 설정 확인은 실제 로그인 성공이나 Google 공개 승인을 의미하지 않습니다.
+  Google의 일반 공개에는 공개 홈페이지·같은 도메인의 개인정보 안내·실제 지원 연락처·도메인 소유권·필요한 브랜딩 검증이 추가로 필요합니다.
+  현재 Azure 공유 주소의 검증 가능성을 먼저 확인하고, 필요 시 도메인 도입·공개·심사 제출은 별도 승인받습니다.
+  Testing 상태나 검증 경고 우회로 공개 완료를 대신하지 않습니다.
+
+## 개인 계정 스키마로 전환하는 초기화
+
+기존 사용자 데이터의 보존·이전은 하지 않습니다. **이 절차는 별도 승인 전 실행 금지**입니다.
+운영 비밀·암호화 키·SQL DB/Redis/Key Vault 리소스·배포 설정·백업은 삭제하지 않습니다.
+
+1. `app.reset_user_data`는 기본 read-only dry-run입니다. schema 0004/0005의 정확한 사용자 행 ID,
+   owner, 검증된 KV 이름/버전 참조, 해당 owner의 Redis key와 승인 digest를 산출합니다.
+   연결 비밀값·대화 내용은 출력하지 않습니다.
+2. 설정된 DB 대상과 정확한 inventory를 사용자에게 제시하고 실제 삭제·점검 영향을 별도 승인받습니다.
+   SQL 운영 inventory는 명시적인 운영 label과 `--sql-cli`로 사용자 Azure CLI 신원을 사용할 수 있습니다.
+   SQL 방화벽·권한이 막히면 임의 허용 규칙을 추가하지 않고 필요한 변경의 별도 승인을 받습니다.
+3. 점검 gate를 먼저 main→GitHub Actions로 배포하고 `WAGL_MAINTENANCE_ENABLED=true`를
+   API/web의 중앙 설정에 반영·재시작하여 새 로그인·개인 요청을 막습니다.
+   실행 중 작업과 이전 worker가 drain되었는지 실제 확인합니다.
+4. 실행에는 승인 inventory 파일, 동일한 `--approved-digest`, 점검 설정과 `--drained` 확인이 모두 필요합니다.
+   inventory가 달라지면 중단합니다. KV soft-delete→정확한 Redis key→DB child/parent 행 순서로 처리하고
+   부분 실패는 숨기지 않습니다. 전체 vault purge·DB DROP·Redis FLUSH·로컬 파일 재귀 삭제는 하지 않습니다.
+5. 초기화 후 SQLite와 Azure SQL에 Alembic head를 적용합니다. `0006`은 legacy 행이 남아 있으면 자동 삭제 대신 실패합니다.
+   기존 SQLite에 `create_all`만 실행해 FK와 schema가 갱신된 것처럼 처리하지 않습니다.
+6. 신규 owner는 UUID이며 사용자 secret은 `waglwaglagent-connection-<digest>` 이름을 사용합니다.
+   기존 `wagl-connection-` 참조는 승인된 legacy 정리에서만 정확한 owner/record로 검증합니다.
+7. 최종 앱은 main→Actions로 배포합니다. readiness·익명 차단·실제 로그인·사용자 A/B 분리·재로그인 영속성을
+   검증한 뒤 점검을 해제합니다. 과거 GitHub-only 릴리스로 새 사용자 데이터를 노출하는 롤백은 하지 않습니다.
 
 ## 기존 로컬 데이터 이전
 

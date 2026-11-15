@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, KeyRound, LoaderCircle, ShieldCheck, X } from "lucide-react";
-import { api, errorMessage, type Endpoint, type Model } from "@/lib/api";
+import { api, errorMessage, notifySessionChange, type Endpoint, type Model } from "@/lib/api";
 import { connectionProviders, type ConnectionProvider } from "@/lib/connection-providers";
 import { GitHubOAuthSetupGuide } from "@/components/github-oauth-setup-guide";
 
@@ -13,9 +13,11 @@ type Props = {
   onLogin: (provider: ConnectionProvider) => void;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  signal?: AbortSignal;
+  sessionId: string;
 };
 
-export function ConnectionDialog({ authenticated, authConfigured, initialProvider, onLogin, onClose, onSaved }: Props) {
+export function ConnectionDialog({ authenticated, authConfigured, initialProvider, onLogin, onClose, onSaved, signal, sessionId }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [provider, setProvider] = useState<ConnectionProvider | null>(initialProvider ?? null);
   const [models, setModels] = useState<Model[]>([]);
@@ -35,25 +37,25 @@ export function ConnectionDialog({ authenticated, authConfigured, initialProvide
     if (!authenticated || !provider) return;
     let active = true;
     if (provider === "copilot") {
-      api<{ copilot_oauth: boolean }>("connection-options")
+      api<{ copilot_oauth: boolean }>("connection-options", { signal }, sessionId)
         .then((options) => { if (active) setOauthReady(options.copilot_oauth); })
         .catch((reason: Error) => { if (active) setError(reason.message); });
     } else if (provider === "openrouter") {
-      api<{ models: Model[] }>("catalog")
+      api<{ models: Model[] }>("catalog", { signal }, sessionId)
         .then((catalog) => { if (active) setModels(catalog.models); })
         .catch((reason: Error) => { if (active) setError(reason.message); });
     }
     return () => { active = false; };
-  }, [provider, authenticated]);
+  }, [provider, authenticated, signal, sessionId]);
 
   useEffect(() => {
     if (provider !== "openrouter" || !model || !authenticated) return;
     let active = true;
-    api<{ endpoints: Endpoint[] }>(`endpoints?model=${encodeURIComponent(model)}`)
+    api<{ endpoints: Endpoint[] }>(`endpoints?model=${encodeURIComponent(model)}`, { signal }, sessionId)
       .then((result) => { if (active) { setEndpoints(result.endpoints); setLoading(false); } })
       .catch((reason: Error) => { if (active) { setError(reason.message); setLoading(false); } });
     return () => { active = false; };
-  }, [provider, model, authenticated]);
+  }, [provider, model, authenticated, signal, sessionId]);
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
@@ -61,8 +63,8 @@ export function ConnectionDialog({ authenticated, authConfigured, initialProvide
     setSaving(true); setError("");
     try {
       await api("credentials", { method: "POST", body: JSON.stringify({
-        provider, label, api_key: apiKey, model: model || null, upstreams, approved: false,
-      }) });
+        provider, label, api_key: apiKey, model: model || null, upstreams, approved: true,
+      }), signal }, sessionId);
       setApiKey("");
       await onSaved();
     } catch (reason) { setError((reason as Error).message); }
@@ -72,10 +74,14 @@ export function ConnectionDialog({ authenticated, authConfigured, initialProvide
   async function connectCopilot() {
     setSaving(true); setError("");
     try {
-      const response = await fetch("/api/connections/copilot/start", { method: "POST" });
+      const response = await fetch("/api/connections/copilot/start", {
+        method: "POST", signal, headers: { "X-Wagl-Session": sessionId, "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: true }),
+      });
       const payload = await response.json();
+      if (response.status === 401 || payload.detail === "Session changed") notifySessionChange();
       if (!response.ok) throw new Error(errorMessage(payload.detail));
-      window.location.assign(payload.authorization_url);
+      if (!signal?.aborted) window.location.assign(payload.authorization_url);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "연결을 시작할 수 없습니다."); setSaving(false); }
   }
 
@@ -97,12 +103,16 @@ export function ConnectionDialog({ authenticated, authConfigured, initialProvide
     {!selected && <p>연결할 서비스를 선택하면 처음 연결하는 순서와 지원 조건을 확인할 수 있습니다. 사이트 로그인과 AI 서비스 연결은 별개입니다.</p>}
     {selected && <>
       <p>{selected.description}</p>
-      {!authenticated ? <div className="dialog-footer">
+      {selected.pending ? <div className="dialog-footer" role="status">
+        <span>승인 대기 중 · 아직 연결할 수 없습니다</span>
+        <p>공식 ChatGPT 로그인 승인 후 이 창에서 연결할 수 있습니다. 그때까지 API 키나 ChatGPT 계정 정보를 입력받지 않습니다.</p>
+      </div> : !authenticated ? <div className="dialog-footer">
         <span>{authConfigured ? "안전한 저장을 위해 먼저 이 사이트에 로그인해주세요." : "사이트 로그인 준비 중입니다. 운영자 설정이 필요합니다."}</span>
-        <button className="primary-button" onClick={() => onLogin(selected.id)}>{authConfigured ? "GitHub로 사이트 로그인" : "운영자 설정 안내"}</button>
+        <button className="primary-button" onClick={() => onLogin(selected.id)}>{authConfigured ? "사이트 로그인 선택" : "운영자 설정 안내"}</button>
       </div> : provider === "copilot" ? <div className="dialog-footer">
-        <span>{oauthReady ? "인증 성공 후 자동 저장 · 전송 동의 전 비활성" : "서비스 연결 준비 중 · 운영자 OAuth 설정 필요"}</span>
-        <button className="primary-button" disabled={!oauthReady || saving} onClick={connectCopilot}>{saving && <LoaderCircle size={16} className="spin" />} GitHub로 Copilot 연결</button>
+        <span>{oauthReady ? "인증 성공 후 동의 저장 · 이용 조건 자동 확인" : "서비스 연결 준비 중 · 운영자 OAuth 설정 필요"}</span>
+        <p>‘동의하고 Copilot 연결’을 누르면 대화·이력·첨부를 GitHub Copilot 및 Copilot이 선택한 모델 제공자로 전송하는 데 동의합니다. 동의는 본인 연결에 저장되며 언제든 철회할 수 있습니다. 남은 포함량이 확인될 때만 전송하고, 추가 과금 차단은 GitHub 예산 설정이 필요합니다.</p>
+        <button className="primary-button" disabled={!oauthReady || saving} onClick={connectCopilot}>{saving && <LoaderCircle size={16} className="spin" />} 동의하고 Copilot 연결</button>
       </div> : <form onSubmit={save}>
         <label className="field-label">연결 이름<input required maxLength={80} placeholder={`내 ${selected.name}`} value={label} onChange={(event) => setLabel(event.target.value)} /></label>
         <label className="field-label">API 키<div className="key-input"><KeyRound size={16} /><input type="password" autoComplete="off" required minLength={8} maxLength={500} placeholder="API 키" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></div></label>
@@ -114,8 +124,8 @@ export function ConnectionDialog({ authenticated, authConfigured, initialProvide
             {endpoints.map((endpoint) => <label key={endpoint.id} className="checkbox-row"><input type="checkbox" aria-label={endpoint.name} checked={upstreams.includes(endpoint.id)} onChange={(event) => setUpstreams(event.target.checked ? [...upstreams, endpoint.id] : upstreams.filter((item) => item !== endpoint.id))} /><span>{endpoint.name}<small>{endpoint.id}</small></span></label>)}
           </fieldset>
         </>}
-        <p>저장 시에는 비활성입니다. 저장 후 내 연결에서 별도로 전송에 동의하세요.</p>
-        <div className="dialog-footer"><button type="button" className="secondary-button" onClick={onClose}>취소</button><button type="submit" className="primary-button" disabled={saving || loading || (provider === "openrouter" && (!model || !upstreams.length))}>{saving ? <LoaderCircle size={16} className="spin" /> : <KeyRound size={16} />} 키 확인 후 저장</button></div>
+        <p>‘동의하고 연결’을 누르면 대화·이력·첨부를 {selected.name}{provider === "openrouter" ? " 및 선택한 실제 처리업체" : ""}에 전송하는 데 동의합니다. 동의는 본인 연결에 저장되며 내 연결에서 언제든 철회할 수 있습니다. 이용 조건은 자동 확인하며, 무료 자격이 확인되지 않거나 유료 호출인 경우 전송하지 않습니다.</p>
+        <div className="dialog-footer"><button type="button" className="secondary-button" onClick={onClose}>취소</button><button type="submit" className="primary-button" disabled={saving || loading || (provider === "openrouter" && (!model || !upstreams.length))}>{saving ? <LoaderCircle size={16} className="spin" /> : <KeyRound size={16} />} 동의하고 연결</button></div>
       </form>}
     </>}
     {error && <div className="dialog-alert" role="alert">{error}</div>}

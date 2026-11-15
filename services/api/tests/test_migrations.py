@@ -13,7 +13,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import Base, Conversation, Credential, Message
+from app.models import Base, Conversation, Credential, Message, User
+from app.reset_user_data import execute, inventory
 from app.security import decrypt_key, encrypt_key
 
 
@@ -45,9 +46,7 @@ def test_initial_migration_matches_models_and_rolls_back(tmp_path, monkeypatch):
                 "INSERT INTO messages (id,conversation_id,role,content,status,created_at) VALUES "
                 "('old-message','old-chat','user','Keep my message','complete','2026-01-01')"
             ))
-        command.upgrade(config, "head")
-        with engine.connect() as connection:
-            assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
+        command.upgrade(config, "0005")
         with Session(engine) as database:
             record = database.get(Credential, "legacy-key")
             assert record.encrypted_key == cipher
@@ -57,6 +56,22 @@ def test_initial_migration_matches_models_and_rolls_back(tmp_path, monkeypatch):
             message = database.get(Message, "old-message")
             assert message.attachments == []
             assert message.content == "Keep my message"
+        with pytest.raises(RuntimeError, match="explicitly approved"):
+            command.upgrade(config, "head")
+        with engine.begin() as connection:
+            assert connection.execute(text("SELECT COUNT(*) FROM credentials")).scalar_one() == 1
+        expected = inventory(engine, url)
+        assert "legacy-private-api-key" not in str(expected)
+        with pytest.raises(ValueError, match="maintenance"):
+            execute(engine, expected, expected["approval_digest"], True)
+        monkeypatch.setenv("WAGL_MAINTENANCE_ENABLED", "true")
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="inventory changed"):
+            execute(engine, expected, "wrong-approval-digest", True)
+        execute(engine, expected, expected["approval_digest"], True)
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
         with pytest.raises(RuntimeError, match="cannot be downgraded"):
             command.downgrade(config, "base")
         assert "messages" in inspect(engine).get_table_names()
@@ -85,13 +100,15 @@ def test_live_sql_migrations_encryption_nullable_accounts_and_cascade(monkeypatc
         url, connect_args={"token_provider": credential}, deprecate_large_types=True,
     )
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+    owner = str(uuid.uuid4())
     try:
         with engine.begin() as connection:
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
         with engine.connect() as connection:
             with Session(connection) as database:
-                owner = "github:sql-migration-test"
+                database.add(User(id=owner))
+                database.flush()
                 for identity in ("sql-key-one", "sql-key-two"):
                     database.add(Credential(
                         id=identity, owner_id=owner, provider="openrouter", label="SQL test",
@@ -122,8 +139,9 @@ def test_live_sql_migrations_encryption_nullable_accounts_and_cascade(monkeypatc
                 with pytest.raises(IntegrityError):
                     database.flush()
             with connection.begin() as transaction:
+                connection.execute(User.__table__.insert().values(id=owner))
                 connection.execute(Conversation.__table__.insert().values(
-                    id="sql-cascade-chat", owner_id="github:sql-test", title="SQL cascade"
+                    id="sql-cascade-chat", owner_id=owner, title="SQL cascade"
                 ))
                 connection.execute(Message.__table__.insert().values(
                     id="sql-cascade-message", conversation_id="sql-cascade-chat",
@@ -136,8 +154,10 @@ def test_live_sql_migrations_encryption_nullable_accounts_and_cascade(monkeypatc
                 transaction.rollback()
         saved_id = uuid.uuid4().hex
         with Session(engine) as database:
+            database.add(User(id=owner))
+            database.flush()
             database.add(Conversation(
-                id=saved_id, owner_id="github:sql-migration-test", title="Durable SQL test"
+                id=saved_id, owner_id=owner, title="Durable SQL test"
             ))
             database.commit()
         engine.dispose()
@@ -149,8 +169,10 @@ def test_live_sql_migrations_encryption_nullable_accounts_and_cascade(monkeypatc
             with Session(engine) as database:
                 saved = database.get(Conversation, saved_id)
                 if saved is not None:
-                    assert saved.owner_id == "github:sql-migration-test"
+                    assert saved.owner_id == owner
                     database.delete(saved)
+                    database.flush()
+                    database.delete(database.get(User, owner))
                     database.commit()
     finally:
         engine.dispose()

@@ -13,6 +13,8 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.accounts import router as accounts_router
+from app.accounts import session_is_active
 from app.attachments import MAX_CONTEXT_IMAGE_BYTES, context_size, prepare_messages
 from app.connections import revoke_copilot, router, usage_state, verify_copilot
 from app.copilot_provider import UPSTREAM, CopilotProvider
@@ -56,6 +58,7 @@ async def lifespan(application: FastAPI):
     application.state.copilot = CopilotProvider()
     application.state.limits = Limits(get_settings().redis_url)
     application.state.active = {}
+    application.state.active_sessions = {}
     application.state.connection_lock = asyncio.Lock()
     yield
     for task in list(application.state.active.values()):
@@ -67,6 +70,13 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="waglwaglagent policy API", lifespan=lifespan)
 app.include_router(router)
+app.include_router(accounts_router)
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_unavailable(_request, error):
+    logger.warning("Database request failed (%s)", type(error).__name__)
+    return JSONResponse({"detail": "account_store_unavailable"}, status_code=503)
 
 
 @app.exception_handler(RequestValidationError)
@@ -247,7 +257,7 @@ async def save_api_key(
         fingerprint=fingerprint,
         model=body.model,
         upstreams=list(dict.fromkeys(body.upstreams)),
-        approved=False,
+        approved=body.approved,
         priority=body.priority,
         quota_group=body.quota_group,
         quota_snapshot=snapshot,
@@ -323,6 +333,15 @@ async def verify_connection(
             credential.auth_status = "authenticated"
         credential.status = snapshot["status"]
         credential.quota_snapshot = snapshot
+    except HTTPException:
+        if credential.provider == "copilot" and credential.auth_status == "authenticated":
+            credential.status = "unverified"
+            credential.quota_snapshot = {
+                "status": "unverified", "reason": "verification_unavailable",
+            }
+            credential.checked_at = timestamp()
+            database.commit()
+        raise
     except ProviderError as error:
         if error.failure == Failure.AUTH:
             credential.status = "invalid"
@@ -576,12 +595,35 @@ def sse(event: str, payload: dict) -> str:
 
 
 async def execute_stream(
-    request, owner, run_id, conversation_id, messages, candidates, lease, deadline=None
+    request, owner, run_id, conversation_id, messages, candidates, lease, deadline=None,
+    session_id=None,
 ):
     text, final_status, provider_name, model_name = "", "interrupted", None, None
     completed_usage = None
     request.app.state.active[owner] = asyncio.current_task()
+    request.app.state.active_sessions[owner] = session_id
+    task = asyncio.current_task()
+
+    async def watch_session():
+        while True:
+            await asyncio.sleep(1)
+            try:
+                active = await asyncio.to_thread(
+                    session_is_active, request.app.state.engine, owner, session_id,
+                )
+            except SQLAlchemyError:
+                logger.warning("Streaming session storage unavailable")
+                active = False
+            if not active:
+                task.cancel()
+                return
+
+    watcher = asyncio.create_task(watch_session())
     try:
+        if not await asyncio.to_thread(
+            session_is_active, request.app.state.engine, owner, session_id,
+        ):
+            raise HTTPException(401, "Session expired")
         yield sse("conversation", {"id": conversation_id})
         async with asyncio.timeout_at(deadline or asyncio.get_running_loop().time() + 60):
             for index, candidate in enumerate(candidates[:3], start=1):
@@ -779,7 +821,11 @@ async def execute_stream(
                         )
                     database.commit()
         finally:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
             request.app.state.active.pop(owner, None)
+            request.app.state.active_sessions.pop(owner, None)
             with suppress(Exception):
                 await request.app.state.limits.release(owner, lease)
     if completed_usage is not None:
@@ -825,6 +871,9 @@ async def chat(body: ChatInput, request: Request, database: Database, owner: Own
             )
         if not candidates:
             raise HTTPException(409, "No approved verified-free provider is available")
+        from app.accounts import valid_session
+
+        valid_session(database, owner, request.state.session_id)
         if not conversation:
             conversation = Conversation(
                 id=identifier(), owner_id=owner, title=(body.prompt or attachments[0]["name"])[:80],
@@ -851,7 +900,8 @@ async def chat(body: ChatInput, request: Request, database: Database, owner: Own
         raise
     return StreamingResponse(
         execute_stream(
-            request, owner, run_id, conversation.id, messages, candidates, lease, deadline
+            request, owner, run_id, conversation.id, messages, candidates, lease, deadline,
+            request.state.session_id,
         ),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},

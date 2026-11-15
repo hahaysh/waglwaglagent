@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     public_url: str = "http://localhost:3000"
     copilot_client_id: str = ""
     copilot_client_secret: str = Field(default="", repr=False)
+    maintenance_enabled: bool = False
 
     @model_validator(mode="before")
     @classmethod

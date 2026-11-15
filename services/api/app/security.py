@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 
-import jwt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import HTTPException, Request
 
@@ -29,24 +28,24 @@ def secret_client():
 
 
 def authenticated_owner(request: Request) -> str:
-    authorization = request.headers.get("authorization", "")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Authentication required")
+    from sqlalchemy.orm import Session
+
+    from app.accounts import canonical_uuid, decode_assertion, valid_session
+
+    if get_settings().maintenance_enabled:
+        raise HTTPException(503, "maintenance")
+    claims = decode_assertion(request, "wagl-api")
     try:
-        claims = jwt.decode(
-            authorization[7:],
-            get_settings().internal_secret,
-            algorithms=["HS256"],
-            audience="wagl-api",
-            issuer="wagl-web",
-            options={"require": ["exp", "iat", "sub", "aud", "iss"]},
-        )
-        owner = claims["sub"]
-        if not isinstance(owner, str) or not owner.startswith("github:") or len(owner) > 100:
+        subject = claims["sub"]
+        if not isinstance(subject, str) or not subject.startswith("user:"):
             raise ValueError("Invalid subject")
-        return owner
-    except (jwt.PyJWTError, ValueError):
+        owner = canonical_uuid(subject[5:])
+    except ValueError:
         raise HTTPException(401, "Invalid authentication") from None
+    with Session(request.app.state.engine) as database:
+        valid_session(database, owner, claims["sid"])
+    request.state.session_id = claims["sid"]
+    return owner
 
 
 def encrypt_key(raw_key: str, owner: str, credential_id: str) -> str:

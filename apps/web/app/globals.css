@@ -314,3 +314,10 @@ input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; 
 }
 @media (max-height: 650px) { .empty-chat { padding: 14px 0; } .empty-symbol { display: none; } .prompt-suggestions { margin-top: 14px; gap: 5px; } .prompt-suggestions button { min-height: 34px; padding: 8px 12px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+/* Public introduction and login do not render private workspace controls. */
+.public-site { max-width: 760px; margin: 0 auto; padding: 64px 24px; line-height: 1.8; }
+.public-site h1 { margin: 40px 0 24px; font-size: clamp(26px, 5vw, 40px); line-height: 1.4; }
+.public-site h2 { margin-top: 32px; }
+.public-site p { margin: 16px 0; }
+.site-login { display: grid; gap: 16px; margin: 32px 0; }
+.site-login > div { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }

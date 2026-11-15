@@ -33,7 +33,10 @@ def validate_configuration(settings: list[dict], web_url: str) -> str:
     vault_url = https_origin(values.get("WAGL_KEY_VAULT_URL", {}).get("value", ""))
     if not urlsplit(vault_url).hostname.endswith(".vault.azure.net"):
         raise ValueError("Expected Azure Key Vault URL")
-    for field in ("AUTH_SECRET", "AUTH_GITHUB_ID", "AUTH_GITHUB_SECRET", "WAGL_INTERNAL_SECRET"):
+    for field in (
+        "AUTH_SECRET", "AUTH_GITHUB_ID", "AUTH_GITHUB_SECRET", "WAGL_INTERNAL_SECRET",
+        "AUTH_GOOGLE_SECRET", "AUTH_MICROSOFT_ENTRA_ID_SECRET",
+    ):
         setting = values.get(field, {})
         if (setting.get("content_type") or setting.get("contentType") or "").split(";")[0] != REFERENCE_TYPE:
             raise ValueError(f"{field} must be a native Key Vault reference, not a plaintext value")
@@ -52,6 +55,12 @@ def validate_configuration(settings: list[dict], web_url: str) -> str:
             "Production GitHub OAuth callback is not confirmed. Register the production OAuth app, "
             "save its ID/secret in Key Vault, and set WAGL_OAUTH_CALLBACK_CONFIRMED=true."
         )
+    for provider in ("GOOGLE", "MICROSOFT_ENTRA_ID"):
+        client_id = values.get(f"AUTH_{provider}_ID", {}).get("value", "")
+        if not client_id or client_id.startswith(("kv://", "{")):
+            raise ValueError(f"AUTH_{provider}_ID must be a public client ID in App Configuration")
+        if values.get(f"WAGL_{provider}_CALLBACK_CONFIRMED", {}).get("value") != "true":
+            raise ValueError(f"{provider} production callback is not confirmed")
     api_url = values.get("WAGL_API_URL", {}).get("value", "")
     if not api_url:
         raise ValueError(

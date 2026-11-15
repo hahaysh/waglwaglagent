@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { signIn, signOut } from "next-auth/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { signIn } from "next-auth/react";
 import Image from "next/image";
 import Link from "next/link";
 import {
@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, consumeStream, errorMessage, type Activity, type ChatAttachment, type ChatMessage, type Conversation, type Credential } from "@/lib/api";
+import { api as requestApi, consumeStream, errorMessage, notifySessionChange, type Activity, type ChatAttachment, type ChatMessage, type Conversation, type Credential } from "@/lib/api";
 import { attachmentAccept, readAttachments } from "@/lib/chat-attachments";
 import { ConnectionDialog } from "@/components/connection-dialog";
 import { GitHubOAuthSetupGuide } from "@/components/github-oauth-setup-guide";
@@ -21,6 +21,9 @@ type View = "chat" | "connections" | "activity";
 type Props = {
   user: { id: string; name: string } | null; authConfigured: boolean;
   initialProvider?: ConnectionProvider; connectionResult?: string;
+  loginProvider: string;
+  sessionId: string;
+  onLogout: () => Promise<void>;
 };
 
 const testPrompts = [
@@ -38,7 +41,7 @@ const testPrompts = [
   },
 ];
 
-export function Workspace({ user, authConfigured, initialProvider, connectionResult }: Props) {
+export function Workspace({ user, authConfigured, initialProvider, connectionResult, loginProvider, sessionId, onLogout }: Props) {
   const [view, setView] = useState<View>(connectionResult || initialProvider ? "connections" : "chat");
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -60,6 +63,9 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
   const [notice, setNotice] = useState("");
   const [selectedConnection, setSelectedConnection] = useState("");
   const controller = useRef<AbortController | null>(null);
+  const lifetime = useRef<AbortController | null>(null);
+  if (!lifetime.current) lifetime.current = new AbortController();
+  const mounted = useRef(true);
   const bottom = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -76,6 +82,19 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
   const blockedConnections = selectedConnection
     ? credentials.filter((credential) => credential.id === selectedConnection) : credentials;
 
+  const api = useCallback(function sessionApi<T>(path: string, options?: RequestInit) {
+    return requestApi<T>(path, {
+      ...options, signal: options?.signal
+        ? AbortSignal.any([lifetime.current!.signal, options.signal]) : lifetime.current!.signal,
+    }, sessionId);
+  }, [sessionId]);
+
+  useEffect(() => {
+    mounted.current = true;
+    if (lifetime.current?.signal.aborted) lifetime.current = new AbortController();
+    return () => { mounted.current = false; lifetime.current?.abort(); controller.current?.abort(); };
+  }, []);
+
   function addConnection() {
     setDialog(true);
   }
@@ -84,32 +103,62 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
     if (!connectionResult && !initialProvider) return;
     window.history.replaceState(null, "", "/");
     if (connectionResult) {
-      if (connectionResult === "saved") setNotice("연결이 저장됐습니다. 메시지 전송 동의는 별도로 설정해주세요.");
+      if (connectionResult === "saved") setNotice("연결이 저장됐습니다. 저장된 전송 동의를 유지하고 이용 조건을 자동 확인합니다.");
       else setError(connectionResult === "oauth_cancelled" ? "GitHub 승인이 취소됐습니다. 연결은 저장하지 않았습니다."
         : "인증을 완료하지 못했습니다. 세션·연결 수·운영자 설정을 확인하고 다시 연결해주세요.");
     }
   }, [connectionResult, initialProvider]);
 
-  async function refresh() {
-    if (!user) return;
+  const loadWorkspace = useCallback(async (verifyCopilot = false) => {
+    const [keys, chats] = await Promise.all([api<Credential[]>("credentials"), api<Conversation[]>("conversations")]);
+    if (!verifyCopilot) return { keys, chats, verificationError: "" };
+    const results = await Promise.allSettled(keys.map((credential) =>
+      credential.provider === "copilot" && credential.approved
+        && credential.auth_type === "oauth" && credential.auth_status === "authenticated"
+        && credential.upstreams.join() === "github-copilot"
+        ? api<Credential>(`credentials/${credential.id}/verify`, {
+          method: "POST", body: "{}", signal: AbortSignal.timeout(40000),
+        }) : Promise.resolve(credential),
+    ));
+    const errors: string[] = [];
+    const checkedKeys = results.map((result, index) => {
+      if (result.status === "fulfilled") return result.value;
+      const credential = keys[index];
+      errors.push(`${credential.label}: ${result.reason instanceof Error ? result.reason.message : errorMessage("verification_unavailable")}`);
+      return { ...credential, status: "unverified", usage_state: "verification_unavailable" };
+    });
+    return { keys: checkedKeys, chats, verificationError: errors.join("\n") };
+  }, [api]);
+
+  async function refresh(verifyCopilot = false) {
+    if (!user || !mounted.current) return;
+    if (verifyCopilot) setConnectionsState("loading");
     try {
-      const [keys, chats] = await Promise.all([api<Credential[]>("credentials"), api<Conversation[]>("conversations")]);
+      const { keys, chats, verificationError } = await loadWorkspace(verifyCopilot);
+      if (!mounted.current) return;
       setCredentials(keys); setConversations(chats); setConnectionsState("ready");
+      if (verificationError) setError(verificationError);
     } catch (reason) {
       setConnectionsState("error");
       throw reason;
     }
   }
 
+  const userId = user?.id;
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     let active = true;
     setConnectionsState("loading");
-    Promise.all([api<Credential[]>("credentials"), api<Conversation[]>("conversations")])
-      .then(([keys, chats]) => { if (active) { setCredentials(keys); setConversations(chats); setConnectionsState("ready"); } })
+    loadWorkspace(true)
+      .then(({ keys, chats, verificationError }) => {
+        if (active) {
+          setCredentials(keys); setConversations(chats); setConnectionsState("ready");
+          if (verificationError) setError(verificationError);
+        }
+      })
       .catch((reason: Error) => { if (active) { setError(reason.message); setConnectionsState("error"); } });
     return () => { active = false; controller.current?.abort(); };
-  }, [user]);
+  }, [userId, loadWorkspace]);
 
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: busy ? "instant" : "smooth", block: "end" }); }, [messages, busy]);
 
@@ -165,7 +214,8 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
     let accepted = false;
     try {
       const response = await fetch("/api/gateway/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" }, signal: abort.signal,
+        method: "POST", headers: { "Content-Type": "application/json", "X-Wagl-Session": sessionId },
+        signal: AbortSignal.any([abort.signal, lifetime.current!.signal]),
         body: JSON.stringify({
           prompt: content, conversation_id: conversationId, request_id: crypto.randomUUID(),
           credential_id: selectedConnection || null,
@@ -174,6 +224,7 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
+        if (response.status === 401 || payload.detail === "Session changed") notifySessionChange();
         throw new Error(errorMessage(payload.detail || "unknown"));
       }
       accepted = true;
@@ -210,7 +261,10 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
   async function addAttachments(files: File[]) {
     if (busy || readingFiles || !files.length) return;
     setReadingFiles(true); setError("");
-    try { setAttachments(await readAttachments(files, attachments)); }
+    try {
+      const result = await readAttachments(files, attachments);
+      if (mounted.current) setAttachments(result);
+    }
     catch (reason) { setError((reason as Error).message); }
     finally { setReadingFiles(false); }
   }
@@ -227,6 +281,7 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
   async function keyAction(credential: Credential, action: "delete" | "verify" | "toggle", priority?: number) {
     if (action === "delete" && !confirm(`‘${credential.label}’ 연결을 삭제할까요?`)) return;
     setLoading(true); setError("");
+    let verifyCopilot = false;
     try {
       if (action === "delete") {
         const result = await api<{ detail?: string } | undefined>(`credentials/${credential.id}`, { method: "DELETE" });
@@ -250,8 +305,9 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
             priority: priority ?? credential.priority,
             upstreams: credential.provider === "copilot" && consent ? ["github-copilot"] : credential.upstreams }),
         });
+        verifyCopilot = priority === undefined && consent && credential.provider === "copilot";
       }
-      await refresh();
+      await refresh(verifyCopilot);
     } catch (reason) { setError((reason as Error).message); }
     finally { setLoading(false); }
   }
@@ -286,7 +342,7 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
         </div>
         <div className="sidebar-bottom">
           <div className="privacy-note"><ShieldCheck size={16} /><span>개인 키 · 개인 할당량</span></div>
-          {user ? <div className="account"><span className="avatar">{user.name.slice(0, 1)}</span><span>{user.name}<small>개인 작업공간</small></span><button className="icon-button" title="로그아웃" aria-label="로그아웃" onClick={() => signOut()}><LogOut size={16} /></button></div>
+          {user ? <div className="account"><span className="avatar">{user.name.slice(0, 1)}</span><span>{user.name}<small>{loginProvider} · 개인 작업공간</small></span><button className="icon-button" title="로그아웃" aria-label="로그아웃" onClick={() => { void onLogout().catch((reason: Error) => setError(reason.message)); }}><LogOut size={16} /></button></div>
             : <button className="login-button" onClick={() => authConfigured ? signIn("github") : setLoginHelp(true)}><LogIn size={18} /> GitHub로 로그인</button>}
         </div>
       </aside>
@@ -422,10 +478,10 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
           {loading && <span className="loading-status" role="status"><LoaderCircle size={15} className="spin" /> 불러오는 중</span>}
         </main>
       </div>
-      {dialog && <ConnectionDialog authenticated={Boolean(user)} authConfigured={authConfigured} initialProvider={dialogProvider} onLogin={(provider) => {
+      {dialog && <ConnectionDialog signal={lifetime.current.signal} sessionId={sessionId} authenticated={Boolean(user)} authConfigured={authConfigured} initialProvider={dialogProvider} onLogin={(provider) => {
         if (authConfigured) void signIn("github", { redirectTo: `/?connect=${provider}` });
         else { setDialog(false); setLoginHelp(true); }
-      }} onClose={() => { setDialog(false); setDialogProvider(undefined); }} onSaved={async () => { await refresh(); setDialog(false); setDialogProvider(undefined); setNotice("연결이 저장됐습니다. 전송 동의 전에는 비활성입니다."); }} />}
+      }} onClose={() => { setDialog(false); setDialogProvider(undefined); }} onSaved={async () => { await refresh(); setDialog(false); setDialogProvider(undefined); setNotice("연결이 저장됐습니다. 전송 동의는 유지되며 이용 조건이 확인된 연결만 사용할 수 있습니다."); }} />}
       {loginHelp && <ConnectionLoginHelp authConfigured={authConfigured} onClose={() => setLoginHelp(false)} />}
     </div>
   );

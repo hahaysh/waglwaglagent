@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { consumeStream, errorMessage } from "../lib/api.ts";
+import { api, consumeStream, errorMessage } from "../lib/api.ts";
 import { boundedBody } from "../lib/request-body.ts";
 
 function response(text, chunkSize = 1) {
@@ -33,6 +33,24 @@ test("Malformed JSON fails and releases reader", async () => {
 
 test("Raw upstream failures are not displayed", () => {
   assert.equal(errorMessage("sk-private-provider-trace"), "요청을 완료하지 못했습니다. 연결 상태를 확인해주세요.");
+});
+
+test("Only authentication conflicts invalidate the expected browser session", async (t) => {
+  let notifications = 0;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    assert.equal(options.headers["X-Wagl-Session"], "expected-session");
+    return new Response(JSON.stringify({ detail: "Credential limit reached" }), { status: 409 });
+  });
+  t.mock.method(globalThis, "BroadcastChannel", function () {
+    return { postMessage() { notifications++; }, close() {} };
+  });
+  await assert.rejects(api("credentials", {}, "expected-session"));
+  assert.equal(notifications, 0);
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    JSON.stringify({ detail: "Session changed" }), { status: 409 },
+  ));
+  await assert.rejects(api("credentials", {}, "expected-session"));
+  assert.equal(notifications, 1);
 });
 
 test("Request body is byte-bounded even without Content-Length", async () => {

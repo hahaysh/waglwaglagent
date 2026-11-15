@@ -82,7 +82,13 @@ def test_customer_content_is_encrypted_in_database_and_round_trips():
     Base.metadata.create_all(engine)
     attachment = {"name": "private.txt", "mime_type": "text/plain", "data": "cHJpdmF0ZQ=="}
     with Session(engine) as database:
-        database.add(Conversation(id="chat", owner_id="github:1", title="Private title"))
+        from app.models import User
+
+        database.add(User(id="11111111-1111-4111-8111-111111111111"))
+        database.flush()
+        database.add(Conversation(
+            id="chat", owner_id="11111111-1111-4111-8111-111111111111", title="Private title",
+        ))
         database.add(Message(
             id="message", conversation_id="chat", role="user", content="Private prompt",
             attachments=[attachment],

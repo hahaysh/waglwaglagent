@@ -10,7 +10,11 @@ export default defineConfig({
     { name: "desktop", use: { viewport: { width: 1440, height: 900 } } },
     { name: "mobile", use: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
   ],
-  webServer: {
+  webServer: [{
+    command: "node tests/e2e/account-api.mjs",
+    url: "http://127.0.0.1:3199/health",
+    reuseExistingServer: false,
+  }, {
     command: "npm run dev -- --hostname 127.0.0.1 --port 3110",
     url: "http://127.0.0.1:3110", reuseExistingServer: false,
     env: {
@@ -22,10 +26,14 @@ export default defineConfig({
       AUTH_SECRET: "test-session-secret-only-not-for-production-0123456789",
       AUTH_GITHUB_ID: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-oauth-client",
       AUTH_GITHUB_SECRET: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-oauth-secret",
+      AUTH_GOOGLE_ID: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-google-client",
+      AUTH_GOOGLE_SECRET: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-google-secret",
+      AUTH_MICROSOFT_ENTRA_ID_ID: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-ms-client",
+      AUTH_MICROSOFT_ENTRA_ID_SECRET: process.env.WAGL_TEST_AUTH_DISABLED ? "" : "test-ms-secret",
       AUTH_TRUST_HOST: "true",
       WAGL_PUBLIC_URL: "http://127.0.0.1:3110",
       WAGL_API_URL: "http://127.0.0.1:3199",
       WAGL_INTERNAL_SECRET: "test-internal-secret-only-not-for-production",
     },
-  },
+  }],
 });

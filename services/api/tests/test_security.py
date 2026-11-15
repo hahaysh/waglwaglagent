@@ -7,8 +7,9 @@ from cryptography.exceptions import InvalidTag
 from fastapi import HTTPException
 from starlette.requests import Request
 
+from app.accounts import decode_assertion
 from app.config import Settings, get_settings
-from app.security import authenticated_owner, decrypt_key, encrypt_key
+from app.security import decrypt_key, encrypt_key
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +24,7 @@ def settings(monkeypatch):
 def token_request(**overrides):
     claims = {
         "sub": "github:1",
+        "sid": "11111111-1111-4111-8111-111111111111",
         "aud": "wagl-api",
         "iss": "wagl-web",
         "iat": datetime.now(UTC),
@@ -33,10 +35,10 @@ def token_request(**overrides):
 
 
 def test_authenticated_identity_is_signed_and_scoped():
-    assert authenticated_owner(token_request()) == "github:1"
-    for overrides in [{"aud": "other"}, {"iss": "other"}, {"exp": 0}, {"sub": "alice"}]:
+    assert decode_assertion(token_request(), "wagl-api")["sub"] == "github:1"
+    for overrides in [{"aud": "other"}, {"iss": "other"}, {"exp": 0}, {"sid": "alice"}]:
         with pytest.raises(HTTPException) as error:
-            authenticated_owner(token_request(**overrides))
+            decode_assertion(token_request(**overrides), "wagl-api")
         assert error.value.status_code == 401
 
 

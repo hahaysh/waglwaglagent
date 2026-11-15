@@ -6,10 +6,12 @@ from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import httpx
 import jwt
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 from redis.exceptions import RedisError
@@ -17,13 +19,26 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.accounts import ISSUERS
 from app.config import get_settings
 from app.main import app, cancel, execute_stream
-from app.models import Conversation, Credential, Message, OAuthAttempt, Run
+from app.models import (
+    Conversation,
+    Credential,
+    LoginIdentity,
+    Message,
+    OAuthAttempt,
+    Run,
+    User,
+    WebSession,
+)
 from app.providers import ProviderError
 from app.routing import Candidate, Failure
 from app.security import decrypt_oauth
 from app.vault import SecretStoreError
+
+OWNER_A = "11111111-1111-4111-8111-111111111111"
+OWNER_B = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
@@ -35,6 +50,20 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("WAGL_REDIS_URL", "")
     get_settings.cache_clear()
     with TestClient(app) as test_client:
+        with Session(app.state.engine) as database:
+            for identity in (OWNER_A, OWNER_B):
+                database.add(User(id=identity))
+                database.flush()
+                database.add(LoginIdentity(
+                    id=identity, user_id=identity, identity_key=identity, provider="github",
+                    issuer=ISSUERS["github"], subject=identity, name="Test",
+                ))
+                database.flush()
+                database.add(WebSession(
+                    id=identity, user_id=identity, identity_id=identity,
+                    expires_at=(datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+                ))
+            database.commit()
         app.state.providers.endpoints = AsyncMock(
             return_value=[
                 {
@@ -56,10 +85,11 @@ def client(tmp_path, monkeypatch):
     get_settings.cache_clear()
 
 
-def headers(owner="github:1"):
+def headers(owner=OWNER_A, sid=None):
     token = jwt.encode(
         {
-            "sub": owner,
+            "sub": f"user:{owner}",
+            "sid": sid or owner,
             "iss": "wagl-web",
             "aud": "wagl-api",
             "iat": datetime.now(UTC),
@@ -69,6 +99,96 @@ def headers(owner="github:1"):
         algorithm="HS256",
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def login_assertion(login_provider="google", subject="external-account", **overrides):
+    claims = {
+        "sub": subject, "sid": str(uuid4()), "provider": login_provider,
+        "identity_issuer": ISSUERS[login_provider], "name": "Same display name",
+        "iss": "wagl-web", "aud": "wagl-login",
+        "iat": datetime.now(UTC), "exp": datetime.now(UTC) + timedelta(seconds=60),
+    } | overrides
+    return {"Authorization": "Bearer " + jwt.encode(
+        claims, get_settings().internal_secret, algorithm="HS256",
+    )}
+
+
+def test_login_identity_reuse_concurrency_and_same_email_never_merge(client):
+    assertion = login_assertion(email="same@example.invalid")
+    first = client.post("/auth/bootstrap", headers=assertion).json()
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        responses = list(executor.map(lambda _: client.post(
+            "/auth/bootstrap", headers=login_assertion(email="same@example.invalid"),
+        ), range(3)))
+    assert all(response.status_code == 200 for response in responses)
+    assert {response.json()["user_id"] for response in responses} == {first["user_id"]}
+    other = client.post("/auth/bootstrap", headers=login_assertion(
+        "microsoft-entra-id", email="same@example.invalid",
+    )).json()
+    assert first["user_id"] != other["user_id"]
+    assert first["session_id"] != other["session_id"]
+    with Session(app.state.engine) as database:
+        identity = database.scalar(select(LoginIdentity).where(
+            LoginIdentity.user_id == first["user_id"],
+        ))
+        assert identity.name == "Same display name"
+        assert not hasattr(identity, "email")
+
+
+def test_bootstrap_boundary_issuer_subject_and_normal_tokens_are_not_interchangeable(client):
+    assert client.post("/auth/bootstrap", headers=headers()).status_code == 401
+    assertion = login_assertion()
+    assert client.get("/credentials", headers=assertion).status_code == 401
+    for override in (
+        {"identity_issuer": "https://accounts.google.com.evil.test"},
+        {"provider": ["google"]}, {"sub": ""}, {"sid": "not-a-session"},
+    ):
+        assert client.post(
+            "/auth/bootstrap", headers=login_assertion(**override),
+        ).status_code == 401
+    for subject in ("external-account", "External-account"):
+        response = client.post("/auth/bootstrap", headers=login_assertion(subject=subject))
+        assert response.status_code == 200
+    with Session(app.state.engine) as database:
+        assert len(list(database.scalars(select(LoginIdentity).where(
+            LoginIdentity.provider == "google",
+        )))) == 2
+    legacy = jwt.encode({
+        "sub": "github:1", "sid": OWNER_A, "iss": "wagl-web", "aud": "wagl-api",
+        "iat": datetime.now(UTC), "exp": datetime.now(UTC) + timedelta(seconds=60),
+    }, get_settings().internal_secret, algorithm="HS256")
+    assert client.get("/credentials", headers={
+        "Authorization": f"Bearer {legacy}",
+    }).status_code == 401
+
+
+def test_session_expiry_revocation_and_wrong_owner_fail_closed(client):
+    key = add_key(client)
+    other_device = str(uuid4())
+    with Session(app.state.engine) as database:
+        database.add(WebSession(
+            id=other_device, user_id=OWNER_A, identity_id=OWNER_A,
+            expires_at=(datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+        ))
+        database.commit()
+    assert client.get("/auth/session", headers=headers()).json()["user_id"] == OWNER_A
+    wrong_sid = jwt.encode({
+        "sub": f"user:{OWNER_B}", "sid": OWNER_A, "iss": "wagl-web", "aud": "wagl-api",
+        "iat": datetime.now(UTC), "exp": datetime.now(UTC) + timedelta(seconds=60),
+    }, get_settings().internal_secret, algorithm="HS256")
+    assert client.get("/credentials", headers={
+        "Authorization": f"Bearer {wrong_sid}",
+    }).status_code == 401
+    assert client.post("/auth/logout", headers=headers()).status_code == 200
+    assert client.get("/credentials", headers=headers()).status_code == 401
+    assert client.get("/credentials", headers=headers(OWNER_A, other_device)).status_code == 200
+    assert client.get("/credentials", headers=headers(OWNER_B)).status_code == 200
+    with Session(app.state.engine) as database:
+        assert database.get(Credential, key["id"]) is not None
+        session = database.get(WebSession, OWNER_B)
+        session.expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        database.commit()
+    assert client.get("/credentials", headers=headers(OWNER_B)).status_code == 401
 
 
 def test_readiness_checks_database_and_redis(client, monkeypatch):
@@ -107,15 +227,26 @@ def add_key(client, **overrides):
     response = client.post("/credentials", json=payload, headers=headers())
     assert response.status_code == 201, response.text
     result = response.json()
-    assert result["approved"] is False
-    if payload["approved"]:
-        response = client.patch(f"/credentials/{result['id']}", headers=headers(), json={
-            "approved": True, "priority": payload.get("priority", 0),
-            "upstreams": payload.get("upstreams", []),
-        })
-        assert response.status_code == 200
-        result = response.json()
+    assert result["approved"] is payload["approved"]
     return result
+
+
+def test_connection_creation_stores_explicit_consent_but_defaults_to_inactive(client):
+    saved = add_key(client)
+    assert saved["usage_state"] == "available"
+    assert client.get("/credentials", headers=headers()).json()[0]["approved"] is True
+    inactive = client.post("/credentials", headers=headers(), json={
+        "provider": "openrouter", "label": "No consent", "api_key": "another-private-key",
+        "model": "vendor/model:free", "upstreams": ["approved/bf16"],
+    })
+    assert inactive.status_code == 201
+    assert inactive.json()["approved"] is False
+    assert inactive.json()["usage_state"] == "consent_required"
+    rejected = client.post("/credentials", headers=headers(), json={
+        "provider": "openrouter", "label": "Wrong upstream", "api_key": "third-private-key",
+        "model": "vendor/model:free", "upstreams": ["unknown-provider"], "approved": True,
+    })
+    assert rejected.status_code == 422
 
 
 def test_vault_connection_lifecycle_and_fail_closed_writes(client, monkeypatch):
@@ -155,12 +286,12 @@ def test_authentication_and_key_isolation(client):
     key = add_key(client)
     assert "private-test-key" not in str(key)
     assert "encrypted_key" not in key
-    assert client.get("/credentials", headers=headers("github:2")).json() == []
+    assert client.get("/credentials", headers=headers(OWNER_B)).json() == []
     for method in ("delete", "patch"):
         response = client.request(
             method,
             f"/credentials/{key['id']}",
-            headers=headers("github:2"),
+            headers=headers(OWNER_B),
             json={"approved": False} if method == "patch" else None,
         )
         assert response.status_code == 404
@@ -212,9 +343,9 @@ def oauth_setup(monkeypatch, *, revoke_status=204):
     return calls
 
 
-def oauth_attempt(client):
+def oauth_attempt(client, approved=False):
     response = client.post("/connections/copilot/start", headers=headers(),
-                           json={"binding": "browser-binding-test-" * 3})
+                           json={"binding": "browser-binding-test-" * 3, "approved": approved})
     assert response.status_code == 200
     url = urlparse(response.json()["authorization_url"])
     query = parse_qs(url.query)
@@ -227,7 +358,7 @@ def test_oauth_owner_browser_binding_replay_and_inactive_storage(client, monkeyp
     calls = oauth_setup(monkeypatch)
     body = oauth_attempt(client)
     path = "/connections/copilot/complete"
-    assert client.post(path, headers=headers("github:2"), json=body).status_code == 400
+    assert client.post(path, headers=headers(OWNER_B), json=body).status_code == 400
     wrong_binding = client.post(
         path, headers=headers(), json=body | {"binding": "wrong-binding-" * 4},
     )
@@ -251,6 +382,58 @@ def test_oauth_owner_browser_binding_replay_and_inactive_storage(client, monkeyp
     reauth = oauth_attempt(client)
     assert client.post(path, headers=headers(), json=reauth).json() == completed.json()
     assert len(client.get("/credentials", headers=headers()).json()) == 1
+
+
+def test_oauth_consent_is_bound_to_start_and_persists_on_same_account_reauth(client, monkeypatch):
+    oauth_setup(monkeypatch)
+    path = "/connections/copilot/complete"
+    body = oauth_attempt(client, approved=True)
+    assert client.post(path, headers=headers(OWNER_B), json=body).status_code == 400
+    completed = client.post(path, headers=headers(), json=body)
+    assert completed.status_code == 200
+    saved = client.get("/credentials", headers=headers()).json()[0]
+    assert saved["approved"] is True
+    assert saved["upstreams"] == ["github-copilot"]
+    assert saved["usage_state"] != "available"
+    reauth = oauth_attempt(client)
+    assert client.post(path, headers=headers(), json=reauth).json() == completed.json()
+    assert client.get("/credentials", headers=headers()).json()[0]["approved"] is True
+    client.patch(f"/credentials/{saved['id']}", headers=headers(), json={"approved": False})
+    pending = oauth_attempt(client)
+    tampered = client.post(path, headers=headers(), json=pending | {"approved": True})
+    assert tampered.status_code == 422
+    assert client.post(path, headers=headers(), json=pending).status_code == 200
+    assert client.get("/credentials", headers=headers()).json()[0]["approved"] is False
+
+
+def test_cancelled_oauth_does_not_save_connection_or_consent(client, monkeypatch):
+    calls = oauth_setup(monkeypatch)
+    body = oauth_attempt(client, approved=True)
+    response = client.post("/connections/copilot/complete", headers=headers(),
+                           json=body | {"code": None, "error": "access_denied"})
+    assert response.json()["detail"] == "oauth_cancelled"
+    assert calls == []
+    assert client.get("/credentials", headers=headers()).json() == []
+
+
+def test_copilot_lookup_failure_invalidates_cached_conditions_not_consent(client, monkeypatch):
+    oauth_setup(monkeypatch)
+    app.state.copilot.verify = AsyncMock(return_value={
+        "status": "valid", "reason": "available", "source": "copilot_sdk",
+    })
+    key = client.post("/connections/copilot/complete", headers=headers(),
+                      json=oauth_attempt(client, approved=True)).json()["id"]
+    assert client.post(f"/credentials/{key}/verify", headers=headers()).json()[
+        "usage_state"
+    ] == "available"
+    monkeypatch.setattr("app.main.verify_copilot", AsyncMock(
+        side_effect=HTTPException(503, "verification_unavailable"),
+    ))
+    assert client.post(f"/credentials/{key}/verify", headers=headers()).status_code == 503
+    saved = client.get("/credentials", headers=headers()).json()[0]
+    assert saved["approved"] is True
+    assert saved["status"] == "unverified"
+    assert saved["usage_state"] == "verification_unavailable"
 
 
 def test_oauth_cancel_expiry_and_delete_never_recreate_connection(client, monkeypatch):
@@ -397,7 +580,7 @@ def test_copilot_included_chat_uses_owner_oauth_and_persists_provenance(client, 
         message = database.scalar(select(Message).where(Message.role == "assistant"))
         assert message.provider == "copilot" and message.model == "free-auto-model"
         assert message.status == "complete"
-    denied = client.post("/chat", headers=headers("github:2"), json={
+    denied = client.post("/chat", headers=headers(OWNER_B), json={
         "prompt": "Hi", "request_id": "copilot-other-owner", "credential_id": key_id,
     })
     assert denied.status_code == 404
@@ -438,7 +621,7 @@ def test_attachments_reach_model_persist_with_owner_and_return_in_followup(clien
     chat_id = client.get("/conversations", headers=headers()).json()[0]["id"]
     saved = client.get(f"/conversations/{chat_id}", headers=headers()).json()["messages"]
     assert saved[0]["attachments"] == [image, document]
-    assert client.get(f"/conversations/{chat_id}", headers=headers("github:2")).status_code == 404
+    assert client.get(f"/conversations/{chat_id}", headers=headers(OWNER_B)).status_code == 404
     followup = client.post("/chat", headers=headers(), json={
         "prompt": "첨부를 다시 설명해줘", "request_id": "attachments-followup",
         "credential_id": key_id, "conversation_id": chat_id,
@@ -618,7 +801,7 @@ def test_new_connections_cannot_bypass_free_only_policy(client, monkeypatch, pro
         })
         assert response.status_code == 201
         result = response.json()
-        assert result["approved"] is False
+        assert result["approved"] is True
         assert client.post("/credentials", headers=headers(), json={
             "provider": provider, "label": "Duplicate", "api_key": "test-private-api-key",
         }).status_code == 409
@@ -658,11 +841,11 @@ def test_stream_persists_provenance_and_rejects_duplicate_request(client):
     assert detail["messages"][-1]["provider"] == "openrouter"
     assert detail["messages"][-1]["content"] == "Actual test output"
     assert (
-        client.get(f"/conversations/{conversation_id}", headers=headers("github:2")).status_code
+        client.get(f"/conversations/{conversation_id}", headers=headers(OWNER_B)).status_code
         == 404
     )
     assert (
-        client.delete(f"/conversations/{conversation_id}", headers=headers("github:2")).status_code
+        client.delete(f"/conversations/{conversation_id}", headers=headers(OWNER_B)).status_code
         == 404
     )
     assert client.post("/chat", headers=headers(), json=payload).status_code == 409
@@ -801,9 +984,9 @@ def test_refusal_and_auth_errors_never_fallback(client, failure, code):
 @pytest.mark.asyncio
 async def test_cancel_persists_partial_closes_stream_and_releases_lease(client):
     key = add_key(client)
-    owner = "github:1"
+    owner = OWNER_A
     conversation_id = "cancel-conversation"
-    run_id = "github:1:cancel-request"
+    run_id = f"{owner}:cancel-request"
     with Session(app.state.engine) as database:
         database.add(Conversation(id=conversation_id, owner_id=owner, title="Cancel test"))
         database.flush()
@@ -840,6 +1023,7 @@ async def test_cancel_persists_partial_closes_stream_and_releases_lease(client):
             [{"role": "user", "content": "Hello"}],
             [candidate],
             lease,
+            session_id=owner,
         ):
             if "event: delta" in event:
                 started.set()
