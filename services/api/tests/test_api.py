@@ -15,7 +15,9 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 from redis.exceptions import RedisError
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import select
+from sqlalchemy.dialects import mssql
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -822,6 +824,28 @@ def test_unapproved_key_cannot_create_chat(client):
     )
     assert response.status_code == 409
     assert client.get("/conversations", headers=headers()).json() == []
+
+
+def test_chat_approved_filter_compiles_for_sql_server(client):
+    add_key(client, approved=False)
+    queries = []
+
+    def capture_query(state):
+        if state.is_select and state.bind_arguments.get("mapper") is not None:
+            if state.bind_arguments["mapper"].class_ is Credential:
+                queries.append(str(state.statement.compile(
+                    dialect=mssql.dialect(), compile_kwargs={"literal_binds": True},
+                )))
+
+    sqlalchemy_event.listen(Session, "do_orm_execute", capture_query)
+    try:
+        response = client.post(
+            "/chat", headers=headers(), json={"prompt": "Hello", "request_id": "sql-filter-test"},
+        )
+    finally:
+        sqlalchemy_event.remove(Session, "do_orm_execute", capture_query)
+    assert response.status_code == 409
+    assert any("credentials.approved = 1" in query for query in queries)
 
 
 def test_stream_persists_provenance_and_rejects_duplicate_request(client):

@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from redis.exceptions import RedisError
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text, true, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -495,7 +495,7 @@ async def candidates_for(
                 select(Credential)
                 .where(
                     Credential.owner_id == owner,
-                    Credential.approved.is_(True),
+                    Credential.approved == true(),
                     Credential.status != "invalid",
                 )
                 .order_by(Credential.priority)

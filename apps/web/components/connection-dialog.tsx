@@ -128,6 +128,7 @@ export function ConnectionDialog({ authenticated, authConfigured, initialProvide
         <div className="dialog-footer"><button type="button" className="secondary-button" onClick={onClose}>취소</button><button type="submit" className="primary-button" disabled={saving || loading || (provider === "openrouter" && (!model || !upstreams.length))}>{saving ? <LoaderCircle size={16} className="spin" /> : <KeyRound size={16} />} 동의하고 연결</button></div>
       </form>}
     </>}
+    {saving && <p className="stream-notice" role="status"><LoaderCircle size={14} className="spin" /> 연결을 처리하고 있습니다. 이용 조건 확인에 30초~1분 정도 걸릴 수 있습니다.</p>}
     {error && <div className="dialog-alert" role="alert">{error}</div>}
     <div className="dialog-privacy"><ShieldCheck size={15} /><span>서버에 암호화 저장 · 본인 요청에만 사용 · 유료 호출 비활성<br />API 키와 인증 토큰은 채팅에 보내지 마세요.</span></div>
     </div>

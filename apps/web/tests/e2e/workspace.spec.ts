@@ -37,6 +37,83 @@ async function login(page: Page, options: { owner?: string; provider?: string; n
   return { owner, sid, expires };
 }
 
+test("saved Copilot connection shows progress until verification completes", async ({ page }) => {
+  await login(page);
+  const copilot = {
+    ...credential, provider: "copilot", label: "내 Copilot", model: "auto",
+    upstreams: ["github-copilot"], auth_type: "oauth",
+  };
+  let release!: () => void;
+  const verification = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/gateway/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.replace("/api/gateway/", "");
+    if (path.endsWith("/verify")) {
+      await verification;
+      return route.fulfill({ json: copilot });
+    }
+    return route.fulfill({ json: path === "credentials" ? [copilot] : [] });
+  });
+  await page.goto("/?connection=saved");
+  await expect(page.getByRole("status").filter({ hasText: "연결이 저장됐습니다" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "30초~1분" })).toBeVisible();
+  await expect(page.getByText("등록된 연결이 없습니다")).toHaveCount(0);
+  release();
+  await expect(page.getByRole("status").filter({ hasText: "30초~1분" })).toHaveCount(0);
+  await expect(page.locator(".connection-row")).toContainText("내 Copilot");
+});
+
+test("connection lookup errors offer retry without claiming no connections exist", async ({ page }) => {
+  await login(page);
+  let available = false;
+  await page.route("**/api/gateway/**", (route) => {
+    const path = new URL(route.request().url()).pathname.replace("/api/gateway/", "");
+    if (path === "credentials" && !available) return route.fulfill({
+      status: 503, json: { detail: "account_store_unavailable" },
+    });
+    return route.fulfill({ json: path === "credentials" ? [credential] : [] });
+  });
+  await page.goto("/?connection=saved");
+  await expect(page.locator(".alert[role=alert]")).toContainText("계정 저장소에 접근할 수 없습니다");
+  await expect(page.getByText("등록된 연결이 없습니다")).toHaveCount(0);
+  available = true;
+  await page.getByRole("button", { name: "연결 상태 다시 불러오기" }).click();
+  await expect(page.locator(".connection-row")).toContainText(credential.label);
+  await expect(page.locator(".alert[role=alert]")).toHaveCount(0);
+});
+
+test("connection save shows progress and retains success when refresh fails", async ({ page }) => {
+  await login(page);
+  let release!: () => void;
+  const saving = new Promise<void>((resolve) => { release = resolve; });
+  let saved = false;
+  await page.route("**/api/gateway/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.replace("/api/gateway/", "");
+    if (path === "credentials" && route.request().method() === "POST") {
+      await saving;
+      saved = true;
+      return route.fulfill({ status: 201, json: credential });
+    }
+    if (path === "credentials" && saved) return route.fulfill({
+      status: 503, json: { detail: "account_store_unavailable" },
+    });
+    return route.fulfill({ json: [] });
+  });
+  await page.goto("/");
+  await navigate(page, "내 연결");
+  await page.getByRole("button", { name: "연결 추가", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Gemini" }).click();
+  await dialog.getByRole("textbox", { name: "연결 이름" }).fill("내 Gemini");
+  await dialog.getByPlaceholder("API 키", { exact: true }).fill("test-private-key");
+  await dialog.getByRole("button", { name: "동의하고 연결" }).click();
+  await expect(dialog.getByRole("status")).toContainText("30초~1분");
+  release();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: "연결이 저장됐습니다" })).toBeVisible();
+  await expect(page.locator(".alert[role=alert]")).toContainText("계정 저장소에 접근할 수 없습니다");
+  await expect(page.getByText("등록된 연결이 없습니다")).toHaveCount(0);
+});
+
 test("account store errors hide private data without pretending the session expired", async ({ page }) => {
   const session = await login(page);
   await page.route("**/api/gateway/**", (route) => route.fulfill({ json: [] }));

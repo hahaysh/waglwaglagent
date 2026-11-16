@@ -96,7 +96,7 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
     if (!connectionResult && !initialProvider) return;
     window.history.replaceState(null, "", "/");
     if (connectionResult) {
-      if (connectionResult === "saved") setNotice("연결이 저장됐습니다. 저장된 전송 동의를 유지하고 이용 조건을 자동 확인합니다.");
+      if (connectionResult === "saved") setNotice("연결이 저장됐습니다. 저장된 전송 동의를 유지하며 이용 조건을 확인합니다.");
       else setError(connectionResult === "oauth_cancelled" ? "GitHub 승인이 취소됐습니다. 연결은 저장하지 않았습니다."
         : "인증을 완료하지 못했습니다. 세션·연결 수·운영자 설정을 확인하고 다시 연결해주세요.");
     }
@@ -384,7 +384,7 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
                 {!user && !authConfigured && <div className="setup-notice"><KeyRound size={13} /> 로그인 설정 대기</div>}
                 {showConnectionStatus && <section id="chat-connection-status" className="chat-connection-status" role="status"
                   aria-label="대화 연결 상태" aria-busy={loading || connectionsState === "loading"} tabIndex={-1} ref={connectionStatus}>
-                  <strong>{connectionsState === "loading" ? "연결 상태를 불러오는 중입니다." : "메시지를 아직 전송할 수 없습니다."}</strong>
+                  <strong>{connectionsState === "loading" ? "연결 상태와 이용 조건을 확인하고 있습니다. 30초~1분 정도 걸릴 수 있습니다." : "메시지를 아직 전송할 수 없습니다."}</strong>
                   {connectionsState === "ready" && error && <p role="alert">{error}</p>}
                   {connectionsState === "error" ? <>
                     <p>연결 상태를 불러오지 못했습니다. {error || "서버 연결을 확인해주세요."} 입력한 메시지는 전송되지 않았습니다.</p>
@@ -459,8 +459,16 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
 
           {view === "connections" && <section className="management-view">
             <div className="view-heading"><div><span className="eyebrow">CONNECTIONS</span><h1>내 연결</h1><p>개인 API 키와 전송 동의</p></div><button className="primary-button" onClick={addConnection}><Plus size={16} /> 연결 추가</button></div>
+            {notice && <div className="stream-notice" role="status"><Check size={13} />{notice}</div>}
+            {(connectionsState === "loading" || loading) && <div className="stream-notice" role="status">
+              <LoaderCircle size={14} className="spin" /> 연결 상태와 이용 조건을 확인하고 있습니다. 30초~1분 정도 걸릴 수 있습니다.
+            </div>}
+            {user && connectionsState === "error" && <button className="text-button" type="button" onClick={() => {
+              setConnectionsState("loading"); setError("");
+              void refresh(true).catch((reason: Error) => setError(reason.message));
+            }}><RefreshCw size={14} /> 연결 상태 다시 불러오기</button>}
             {!user && <div className="empty-state"><KeyRound size={26} /><h2>로그인 후 연결을 등록하세요</h2><p>등록한 키와 연결은 로그인한 본인 계정에만 저장되고 본인 요청에만 사용됩니다.</p><button className="text-button" onClick={() => goLogin("/?connect=copilot")}>로그인</button></div>}
-            {user && credentials.length === 0 && <div className="empty-state"><KeyRound size={26} /><h2>등록된 연결이 없습니다</h2><button className="text-button" onClick={() => setDialog(true)}>첫 연결 추가 <ArrowUp size={14} /></button></div>}
+            {user && connectionsState === "ready" && credentials.length === 0 && <div className="empty-state"><KeyRound size={26} /><h2>등록된 연결이 없습니다</h2><button className="text-button" onClick={() => setDialog(true)}>첫 연결 추가 <ArrowUp size={14} /></button></div>}
             <div className="connection-list">{credentials.map((credential) => <div className="connection-row" key={credential.id}>
               <ProviderLogo provider={credential.provider} /><div className="connection-detail"><strong>{credential.label}</strong><span>{credential.model || connectionProviders.find((entry) => entry.id === credential.provider)?.name}</span><small>{credential.auth_type === "oauth" ? "OAuth 연결" : "API 키 연결"} · {credential.auth_status === "reauth_required" ? "재인증 필요" : "인증됨"}</small><small>{credential.upstreams.join(", ")}</small><span className={`credential-status ${credential.usage_state === "available" ? "valid" : ""}`}>{connectionStateLabels[credential.usage_state || ""] || (credential.status === "valid" ? "키 확인됨" : "무료 자격 미확인")}</span>{credential.provider === "copilot" && <><small>{credential.quota_snapshot.plan && `공식 조회 플랜: ${credential.quota_snapshot.plan} · `}{credential.checked_at ? `확인: ${new Date(credential.checked_at).toLocaleString("ko-KR")}` : "이용 조건을 다시 확인하세요."} 매 요청 전 남은 포함량·초과 사용 여부를 재검사합니다.</small><p>개인 유료·Business·Enterprise 구독도 추가 요금 없는 포함 사용량은 이용할 수 있습니다. 기존 구독료는 별도입니다. 다른 앱의 동시 사용이나 응답 중 소진까지 추가 과금을 막으려면 GitHub의 예산·사용 중지를 설정하세요.</p>{credential.quota_snapshot.overage_allowed && <p>GitHub의 소진 후 초과 사용이 허용돼 있습니다. 앱은 남은 포함량을 확인하지만 다른 앱의 동시 사용이나 처리 중 소진까지 과금을 보장하지는 못합니다. 추가 과금을 확실히 차단하려면 GitHub의 예산·사용 중지를 설정하세요.</p>}</>}{["copilot_plan_not_free", "copilot_overage_enabled", "copilot_overage_in_use"].includes(credential.usage_state || "") && <p>{connectionStateDescriptions[credential.usage_state || ""]}</p>}{credential.auth_type === "oauth" && <button className="text-button" onClick={() => { setDialogProvider("copilot"); setDialog(true); }}>Copilot 다시 연결</button>}</div>
               <div className="connection-controls"><label className="priority-control">우선순위 <input type="number" min={0} max={100} aria-label={`${credential.label} 우선순위`} defaultValue={credential.priority} disabled={loading} onBlur={(event) => { const priority = Number(event.target.value); if (Number.isInteger(priority) && priority >= 0 && priority <= 100 && priority !== credential.priority) void keyAction(credential, "toggle", priority); }} /></label><label className="switch-label"><input type="checkbox" role="switch" aria-label={`${credential.label} 전송 동의`} checked={credential.approved && (credential.provider !== "copilot" || credential.upstreams.join() === "github-copilot")} disabled={loading} onChange={() => keyAction(credential, "toggle")} /><span className="switch-track" /> 전송 동의</label><button className={credential.provider === "copilot" ? "text-button" : "icon-button"} aria-label={`${credential.label} ${credential.provider === "copilot" ? "이용 조건 다시 확인" : "키 다시 확인"}`} title="자격 다시 확인" disabled={loading} onClick={() => keyAction(credential, "verify")}><RefreshCw size={16} />{credential.provider === "copilot" && "이용 조건 다시 확인"}</button><button className="icon-button danger" title="연결 삭제" aria-label={`${credential.label} 연결 삭제`} disabled={loading} onClick={() => keyAction(credential, "delete")}><Trash2 size={16} /></button></div>
@@ -475,7 +483,12 @@ export function Workspace({ user, authConfigured, initialProvider, connectionRes
           {loading && <span className="loading-status" role="status"><LoaderCircle size={15} className="spin" /> 불러오는 중</span>}
         </main>
       </div>
-      {dialog && <ConnectionDialog signal={lifetime.current.signal} sessionId={sessionId} authenticated={Boolean(user)} authConfigured={authConfigured} initialProvider={dialogProvider} onLogin={(provider) => goLogin(`/?connect=${provider}`)} onClose={() => { setDialog(false); setDialogProvider(undefined); }} onSaved={async () => { await refresh(); setDialog(false); setDialogProvider(undefined); setNotice("연결이 저장됐습니다. 전송 동의는 유지되며 이용 조건이 확인된 연결만 사용할 수 있습니다."); }} />}
+      {dialog && <ConnectionDialog signal={lifetime.current.signal} sessionId={sessionId} authenticated={Boolean(user)} authConfigured={authConfigured} initialProvider={dialogProvider} onLogin={(provider) => goLogin(`/?connect=${provider}`)} onClose={() => { setDialog(false); setDialogProvider(undefined); }} onSaved={async () => {
+        setDialog(false); setDialogProvider(undefined);
+        setNotice("연결이 저장됐습니다. 전송 동의는 유지되며 이용 조건이 확인된 연결만 사용할 수 있습니다.");
+        setConnectionsState("loading");
+        try { await refresh(); } catch (reason) { setError((reason as Error).message); }
+      }} />}
     </div>
   );
 }
